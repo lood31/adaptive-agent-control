@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.npm/
+*.tsbuildinfo
+.env
+
+# Local Pi project state
+.pi/

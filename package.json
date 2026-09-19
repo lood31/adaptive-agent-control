@@ -1,0 +1,59 @@
+{
+  "name": "adaptive-agent-control",
+  "version": "0.1.0",
+  "description": "A provider-neutral adaptive control plane for Pi agents",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "agent-control"],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/src/core/index.d.ts",
+      "import": "./dist/src/core/index.js"
+    },
+    "./pi": {
+      "types": "./dist/src/pi/index.d.ts",
+      "import": "./dist/src/pi/index.js"
+    },
+    "./providers/typesafe-jev": {
+      "types": "./dist/src/providers/typesafe-jev.d.ts",
+      "import": "./dist/src/providers/typesafe-jev.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/tests/core.test.js dist/tests/extension.test.js dist/tests/session-store.test.js",
+    "eval:fixtures": "npm run build && node dist/eval/score.js",
+    "test:live": "npm run build && node --test dist/tests/live.test.js",
+    "prepack": "npm run build"
+  },
+  "files": [
+    "dist",
+    "eval",
+    "skills",
+    "TECHNICAL_DESIGN_v0.1.md",
+    "README.md",
+    "package.json"
+  ],
+  "pi": {
+    "extensions": ["./dist/src/pi/index.js"],
+    "skills": ["./skills"]
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@types/node": "^24.0.0",
+    "typebox": "^1.3.7",
+    "typescript": "^5.9.2"
+  }
+}
