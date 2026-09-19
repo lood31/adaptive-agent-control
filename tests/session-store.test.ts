@@ -18,6 +18,7 @@ const persisted: PersistedControlState = {
   mode: "assist",
   tracker,
   recentAssessments: [],
+  shadowTelemetry: [{ schemaVersion: 1, laterOutcome: "recovered" } as never],
 };
 
 test("session store reads the newest adaptive entry and external goal/plan state", () => {
@@ -26,7 +27,9 @@ test("session store reads the newest adaptive entry and external goal/plan state
     { type: "custom", customType: "plan-state", data: { isActive: true, requirement: "ship", planFilePath: ".taiji-harness/ship/plan.md" } },
     { type: "custom", customType: "adaptive-control:v1", data: persisted },
   ] as unknown as SessionEntry[];
-  assert.equal(latestState(entries)?.mode, "assist");
+  const restored = latestState(entries);
+  assert.equal(restored?.mode, "assist");
+  assert.deepEqual(restored?.shadowTelemetry, []);
   const external = externalState(entries);
   assert.equal(external.goal?.id, "g1");
   assert.equal(external.plan?.active, true);

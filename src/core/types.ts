@@ -48,7 +48,10 @@ export interface ObservedState {
   counters: {
     consecutiveFailures: number;
     repeatedFailureCount: number;
+    /** Number of completed edit operations still present in recentEvents. */
     editChurn: number;
+    /** Repeated identical failures separated by one or more edits in recentEvents. */
+    editOscillationCount?: number;
     turnsSinceIntervention: number;
   };
   completionAttempt?: CompletionAttempt;
@@ -113,11 +116,30 @@ export interface PendingAdvice {
   action: Exclude<ControlAction, "CONTINUE">;
   reasonCodes: string[];
   stateHash: string;
+  telemetryId?: string;
   createdAt: number;
 }
 
+export type AdviceDelivery = "not-applicable" | "pending" | "delivered";
+export type ObservedInterventionAction = "unknown";
+export type PostDecisionOutcomeLabel = "improved" | "persisted" | "regressed" | "inconclusive";
+
+export interface OutcomeEvidence {
+  successfulTools: number;
+  failedTools: number;
+  repeatedFailureDelta: number;
+  observedToolResults: number;
+  observedTurns: number;
+}
+
+export interface PostDecisionOutcome {
+  label: PostDecisionOutcomeLabel;
+  evidence: OutcomeEvidence;
+}
+
 export interface ShadowTelemetry {
-  schemaVersion: 1;
+  schemaVersion: 2;
+  id: string;
   trigger: string;
   check: ControlCheck;
   signals: Partial<SignalSet>;
@@ -128,7 +150,10 @@ export interface ShadowTelemetry {
   model: string;
   latencyMs: number;
   timestamp: number;
-  laterOutcome?: "recovered" | "persisted";
+  adviceDelivery: AdviceDelivery;
+  actionObserved: ObservedInterventionAction;
+  outcomeWindow: OutcomeEvidence;
+  postDecisionOutcome?: PostDecisionOutcome;
 }
 
 export interface Thresholds {

@@ -25,7 +25,12 @@ export function latestState(entries: readonly SessionEntry[]): PersistedControlS
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (!isControlEntry(entry)) continue;
-    return entry.data;
+    return {
+      ...entry.data,
+      ...(entry.data.shadowTelemetry
+        ? { shadowTelemetry: entry.data.shadowTelemetry.filter(isShadowTelemetryV2) }
+        : {}),
+    };
   }
   return undefined;
 }
@@ -52,6 +57,12 @@ function isControlEntry(entry: SessionEntry | undefined): entry is CustomEntry<P
     && validModes.includes(String(candidate.mode))
     && Boolean(candidate.tracker && typeof candidate.tracker === "object")
     && Array.isArray(candidate.recentAssessments);
+}
+
+function isShadowTelemetryV2(value: ShadowTelemetry): value is ShadowTelemetry {
+  return value?.schemaVersion === 2
+    && typeof value.id === "string"
+    && Boolean(value.outcomeWindow && typeof value.outcomeWindow === "object");
 }
 
 function readGoal(data: Record<string, unknown>): GoalSnapshot {

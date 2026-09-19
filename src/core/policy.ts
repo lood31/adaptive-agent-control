@@ -10,7 +10,7 @@ import type {
 
 /** The canonical shipped policy. Config may override these experimental parameters. */
 export const POLICY_SPEC = Object.freeze({
-  version: "v0.2",
+  version: "v0.2.1",
   thresholds: Object.freeze({
     stuck: 0.8,
     planStale: 0.8,

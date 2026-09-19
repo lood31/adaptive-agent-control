@@ -69,6 +69,21 @@ test("Pi extension registers the tool, command, and observes repeated failures",
   const blocked = await callHandler({ toolName: "goal_control", input: { action: "complete", evidence: "done" } }, context) as { block?: boolean } | undefined;
   assert.equal(blocked?.block, true);
 
+  const advice = await handlers.get("before_agent_start")?.({}, context) as { message?: { details?: { telemetryId?: string } } } | undefined;
+  assert.ok(advice?.message?.details?.telemetryId);
+  assert.ok(emitted.some((item) => typeof item === "object" && item !== null
+    && "id" in item && (item as { id?: string }).id === advice.message?.details?.telemetryId
+    && "adviceDelivery" in item && (item as { adviceDelivery?: string }).adviceDelivery === "delivered"));
+
+  const success = { toolName: "read", input: { path: "package.json" }, isError: false, content: [{ type: "text", text: "ok" }] };
+  await resultHandler(success, context);
+  await resultHandler(success, context);
+  await handlers.get("turn_end")?.({}, context);
+  await handlers.get("turn_end")?.({}, context);
+  assert.ok(emitted.some((item) => typeof item === "object" && item !== null
+    && "postDecisionOutcome" in item
+    && (item as { postDecisionOutcome?: { label?: string } }).postDecisionOutcome?.label === "improved"));
+
   assert.ok(registeredTool);
   await registeredTool.execute(
     "tool-call",
@@ -79,5 +94,11 @@ test("Pi extension registers the tool, command, and observes repeated failures",
   );
   assert.equal(providerContexts.at(-1)?.agentContext?.hypothesis, "the dependency changed");
   assert.deepEqual(providerContexts.at(-1)?.agentContext?.evidenceClaims, ["test output ref"]);
-  assert.ok(emitted.some((item) => typeof item === "object" && item !== null && "trigger" in item && "decision" in item));
+  await handlers.get("agent_end")?.({}, context);
+  assert.ok(emitted.some((item) => typeof item === "object" && item !== null
+    && "postDecisionOutcome" in item
+    && (item as { postDecisionOutcome?: { label?: string } }).postDecisionOutcome?.label === "inconclusive"));
+  assert.ok(emitted.some((item) => typeof item === "object" && item !== null
+    && "schemaVersion" in item && (item as { schemaVersion?: number }).schemaVersion === 2
+    && "trigger" in item && "decision" in item));
 });

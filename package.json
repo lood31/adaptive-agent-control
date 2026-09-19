@@ -1,9 +1,13 @@
 {
   "name": "adaptive-agent-control",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A provider-neutral adaptive control plane for Pi agents",
   "type": "module",
-  "keywords": ["pi-package", "pi-extension", "agent-control"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "agent-control"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -35,12 +39,17 @@
     "skills",
     "TECHNICAL_DESIGN_v0.1.md",
     "TECHNICAL_DESIGN_v0.2.md",
+    "TECHNICAL_DESIGN_v0.2.1.md",
     "README.md",
     "package.json"
   ],
   "pi": {
-    "extensions": ["./dist/src/pi/index.js"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./dist/src/pi/index.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "dependencies": {
     "@typesafe-ai/sdk": "^0.6.0"

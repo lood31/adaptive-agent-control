@@ -13,7 +13,13 @@ export function triggerFor(check: ControlCheck, state: ObservedState, _config: A
     };
   }
 
-  if (state.counters.consecutiveFailures >= 2 || state.counters.repeatedFailureCount >= 2) {
+  const latestEvent = state.recentEvents.at(-1);
+  const latestResultFailed = latestEvent?.ok === false;
+  if (state.plan?.active && latestResultFailed && (state.counters.editOscillationCount ?? 0) >= 1) {
+    return { shouldAssess: true, reason: "edit_failure_oscillation" };
+  }
+
+  if (latestResultFailed && (state.counters.consecutiveFailures >= 2 || state.counters.repeatedFailureCount >= 2)) {
     return {
       shouldAssess: true,
       reason: state.counters.repeatedFailureCount >= 2 ? "repeated_failure" : "consecutive_failures",
@@ -21,7 +27,7 @@ export function triggerFor(check: ControlCheck, state: ObservedState, _config: A
   }
 
   if (state.plan?.active && state.counters.editChurn >= 4) {
-    return { shouldAssess: true, reason: "high_edit_churn" };
+    return { shouldAssess: true, reason: "high_recent_edit_churn" };
   }
 
   return { shouldAssess: false, reason: "threshold_not_reached" };

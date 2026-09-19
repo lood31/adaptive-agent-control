@@ -10,6 +10,13 @@ import { Type } from "typebox";
 import type { Static } from "typebox";
 import { TypeSafeJevProvider } from "../providers/typesafe-jev.js";
 import { makeAssessment, makeFailOpenAssessment } from "../core/policy.js";
+import {
+  advanceOutcomeTurn,
+  classifyOutcome,
+  emptyOutcomeEvidence,
+  outcomeWindowComplete,
+  recordOutcomeResult,
+} from "../core/outcome.js";
 import { stableHash } from "../core/hash.js";
 import { StateTracker } from "../core/state-builder.js";
 import { inCooldown, triggerFor } from "../core/trigger-engine.js";
@@ -132,12 +139,18 @@ export function registerAdaptiveControl(
   });
 
   pi.on("turn_end", async () => {
-    runtime.tracker.endTurn();
+    runtime.endTurn();
     runtime.persist();
   });
 
-  pi.on("agent_end", async () => runtime.persist());
-  pi.on("session_shutdown", async () => runtime.persist());
+  pi.on("agent_end", async () => {
+    runtime.finalizeOutcomes();
+    runtime.persist();
+  });
+  pi.on("session_shutdown", async () => {
+    runtime.finalizeOutcomes();
+    runtime.persist();
+  });
   pi.on("before_agent_start", async () => runtime.consumeAdvice());
 
   pi.registerCommand("adaptive-control", {
@@ -166,6 +179,8 @@ interface AdaptiveRuntime {
   ensure(ctx: ExtensionContext): void;
   recordToolCall(event: ToolCallEvent): void;
   recordToolResult(event: ToolResultEvent): void;
+  endTurn(): void;
+  finalizeOutcomes(): void;
   assess(
     check: ControlCheck,
     signal: AbortSignal | undefined,
@@ -217,25 +232,49 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
       if (!initialized || tracker.sessionId !== ctx.sessionManager.getSessionId()) runtime.restore(ctx);
     },
     recordToolCall(event) {
-      tracker.recordToolCall(event.toolName, event.input);
+      if (event.toolName !== "control_assess") tracker.recordToolCall(event.toolName, event.input);
     },
     recordToolResult(event) {
+      if (event.toolName === "control_assess") return;
+      const repeatedBefore = tracker.getState().counters.repeatedFailureCount;
       tracker.recordToolResult(event.toolName, event.input, event.isError, event.content, event.details);
-      let unresolved: ShadowTelemetry | undefined;
-      for (let index = shadowTelemetry.length - 1; index >= 0; index -= 1) {
-        const candidate = shadowTelemetry[index];
-        if (candidate && candidate.decision !== "CONTINUE" && !candidate.laterOutcome) {
-          unresolved = candidate;
-          break;
+      const repeatedAfter = tracker.getState().counters.repeatedFailureCount;
+      const exitCode = event.details && typeof event.details === "object" && "exitCode" in event.details
+        ? (event.details as { exitCode?: unknown }).exitCode
+        : undefined;
+      const succeeded = !event.isError && (typeof exitCode !== "number" || exitCode === 0);
+      let finalized = false;
+      for (const telemetry of shadowTelemetry) {
+        if (telemetry.decision === "CONTINUE" || telemetry.postDecisionOutcome) continue;
+        telemetry.outcomeWindow = recordOutcomeResult(
+          telemetry.outcomeWindow,
+          succeeded,
+          repeatedAfter - repeatedBefore,
+        );
+        if (outcomeWindowComplete(telemetry.outcomeWindow)) {
+          telemetry.postDecisionOutcome = classifyOutcome(telemetry.outcomeWindow);
+          pi.events.emit("adaptive-control:telemetry:v2", structuredClone(telemetry));
+          finalized = true;
         }
       }
-      if (unresolved) {
-        const exitCode = event.details && typeof event.details === "object" && "exitCode" in event.details
-          ? (event.details as { exitCode?: unknown }).exitCode
-          : undefined;
-        const succeeded = !event.isError && (typeof exitCode !== "number" || exitCode === 0);
-        unresolved.laterOutcome = succeeded ? "recovered" : "persisted";
-        pi.events.emit("adaptive-control:telemetry:v1", structuredClone(unresolved));
+      if (finalized) runtime.persist();
+    },
+    endTurn() {
+      tracker.endTurn();
+      for (const telemetry of shadowTelemetry) {
+        if (telemetry.decision === "CONTINUE" || telemetry.postDecisionOutcome) continue;
+        telemetry.outcomeWindow = advanceOutcomeTurn(telemetry.outcomeWindow);
+        if (outcomeWindowComplete(telemetry.outcomeWindow)) {
+          telemetry.postDecisionOutcome = classifyOutcome(telemetry.outcomeWindow);
+          pi.events.emit("adaptive-control:telemetry:v2", structuredClone(telemetry));
+        }
+      }
+    },
+    finalizeOutcomes() {
+      for (const telemetry of shadowTelemetry) {
+        if (telemetry.decision === "CONTINUE" || telemetry.postDecisionOutcome) continue;
+        telemetry.postDecisionOutcome = classifyOutcome(telemetry.outcomeWindow);
+        pi.events.emit("adaptive-control:telemetry:v2", structuredClone(telemetry));
       }
     },
     async assess(check, signal, force, trigger, agentContext) {
@@ -264,17 +303,20 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
       const intervened = assessment.action !== "CONTINUE" && (config.mode === "assist" || config.mode === "enforce");
       tracker.markAssessed(check, stateHash, intervened);
       remember(assessment);
+      const telemetryId = stableHash({ check, stateHash, timestamp: assessment.timestamp }).slice(0, 16);
       if (assessment.action !== "CONTINUE" && (config.mode === "assist" || config.mode === "enforce")) {
         pendingAdvice = {
           check,
           action: assessment.action,
           reasonCodes: assessment.reasonCodes,
           stateHash,
+          telemetryId,
           createdAt: Date.now(),
         };
       }
       const telemetry: ShadowTelemetry = {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        id: telemetryId,
         trigger,
         check,
         signals: assessment.signals,
@@ -285,11 +327,14 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
         model: assessment.model,
         latencyMs: assessment.latencyMs,
         timestamp: assessment.timestamp,
+        adviceDelivery: pendingAdvice?.telemetryId === telemetryId ? "pending" : "not-applicable",
+        actionObserved: "unknown",
+        outcomeWindow: emptyOutcomeEvidence(),
       };
       shadowTelemetry = [...shadowTelemetry, telemetry].slice(-100);
       runtime.persist();
       pi.events.emit("adaptive-control:assessment:v1", assessment);
-      pi.events.emit("adaptive-control:telemetry:v1", telemetry);
+      pi.events.emit("adaptive-control:telemetry:v2", telemetry);
       if (assessment.action !== "CONTINUE" && pendingAdvice) pi.events.emit("adaptive-control:intervention:v1", pendingAdvice);
       return assessment;
     },
@@ -309,6 +354,11 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
       if (!pendingAdvice || (config.mode !== "assist" && config.mode !== "enforce")) return undefined;
       const advice = pendingAdvice;
       pendingAdvice = undefined;
+      const telemetry = shadowTelemetry.find((item) => item.id === advice.telemetryId);
+      if (telemetry) {
+        telemetry.adviceDelivery = "delivered";
+        pi.events.emit("adaptive-control:telemetry:v2", structuredClone(telemetry));
+      }
       runtime.persist();
       return {
         message: {

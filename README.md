@@ -2,7 +2,7 @@
 
 Pi Agent 的自适应控制平面：Decision Provider 只产出窄信号，确定性 policy 负责动作仲裁。
 
-**v0.2** 提供 Pi Extension、三个可移植 Skill，以及可替换的 TypeSafe Jev provider。项目的核心不是“让小模型决定下一步”，而是把 `trajectory → signals → policy → intervention → outcome` 做成可观察、可回放的控制闭环。
+**v0.2.1** 提供 Pi Extension、三个可移植 Skill，以及可替换的 TypeSafe Jev provider。项目的核心不是“让小模型决定下一步”，而是把 `trajectory → signals → policy → recommendation → post-decision outcome` 做成可观察、可回放的控制闭环。
 
 ## 控制链
 
@@ -57,7 +57,7 @@ HMAC(sessionKey,
   tool + normalized operation identity + exit class + error class)
 ```
 
-bash identity 包含 executable、operation 和参数结构，因此 `npm test`、`python foo.py`、`git status` 不会仅因 input shape 相同而被计为同一策略。原始 command 不进入 fingerprint 或 telemetry；session key 只随 controller state 保存，用于跨 turn 保持一致。
+bash identity 包含 executable、canonical operation 和参数结构。v0.2.1 对 `npm run <script>`、`git <subcommand>`、`python <script>`、`pytest <target>` 和 `cargo <subcommand>` 做小型归一化，因此 `npm run test` 与 `npm run build` 不再碰撞。原始 command 不进入 fingerprint；session key 只随 controller state 保存，用于跨 turn 保持一致。
 
 ## 内容与隐私策略
 
@@ -73,32 +73,18 @@ bash identity 包含 executable、operation 和参数结构，因此 `npm test`�
 
 `full-local-only` 的名字表达“内容不得离开本地”，并不承诺 AAC 持久化完整文件。API key 只从 `TYPESAFE_API_KEY` 读取，不写入 session。
 
-## Shadow telemetry
+## 窗口信号与 Shadow telemetry
 
-每次 assessment 都会发出并持久化一个 `adaptive-control:telemetry:v1` 事件：
+`editChurn` 不再是会永久增长的累计值，而是当前 `recentEvents` 窗口内已完成 edit 的数量。controller 还会识别 `edit → 相同失败 → edit → 相同失败` 的 `edit_failure_oscillation`。重复失败历史保留在同一个有界窗口内，不会被中间无关的成功 read/status 错误抹掉。
 
-```json
-{
-  "schemaVersion": 1,
-  "trigger": "repeated_failure",
-  "check": "trajectory",
-  "signals": {
-    "stuck": 0.91,
-    "planStale": 0.34,
-    "reflectionLikelyHelpful": 0.82
-  },
-  "decision": "REFLECT",
-  "mode": "observe",
-  "stateHash": "…",
-  "provider": "typesafe",
-  "model": "jev-latest",
-  "latencyMs": 104,
-  "timestamp": 0,
-  "laterOutcome": "recovered"
-}
-```
+每次 assessment 都会发出并持久化一个 `adaptive-control:telemetry:v2` 事件。v2 明确分开：
 
-`laterOutcome` 是轻量启发式标签：干预后下一次成功 tool result 记为 `recovered`，失败记为 `persisted`。它适合 shadow analysis，不等同于因果归因。
+- `decision`：controller 产生的推荐；
+- `adviceDelivery`：`not-applicable | pending | delivered`；
+- `actionObserved`：当前只能诚实记录为 `unknown`；
+- `postDecisionOutcome`：最多后续 6 个 tool result 或 2 个 turn 的非因果趋势标签。
+
+趋势标签为 `improved | persisted | regressed | inconclusive`，并携带成功/失败工具数、重复失败变化和观察窗口大小。它描述“决策之后发生了什么”，**不声称建议被执行，也不声称结果由干预造成**。窗口不足或 session 提前结束时使用 `inconclusive`。旧 v1 telemetry 在恢复 session 时会被安全忽略。
 
 ## 安装与配置
 
@@ -156,4 +142,4 @@ npm pack --dry-run
 
 `eval/cases.jsonl` 当前包含 32 条带标签 trajectory cases，并报告 intervention precision/recall、false/missed intervention rate 和 action preferred-match。它们用于验证 deterministic policy 与标注 schema，**不证明 AAC 对真实 agent 有效，也不证明 Jev signal quality**。下一步评估应使用脱敏真实轨迹、人工复标和离线 policy/provider replay。
 
-完整 v0.2 设计：[TECHNICAL_DESIGN_v0.2.md](./TECHNICAL_DESIGN_v0.2.md)
+设计文档：[v0.2](./TECHNICAL_DESIGN_v0.2.md) · [v0.2.1 measurement integrity](./TECHNICAL_DESIGN_v0.2.1.md)

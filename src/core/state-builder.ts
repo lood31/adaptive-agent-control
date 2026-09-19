@@ -46,9 +46,16 @@ interface OperationIdentity {
 
 function commandIdentity(command: string): OperationIdentity {
   const tokens = command.trim().split(/\s+/).slice(0, 16);
+  const executable = (tokens[0]?.split(/[\\/]/).at(-1) ?? "unknown").toLowerCase();
+  const positional = tokens.slice(1).filter((token) => !token.startsWith("-"));
+  let operation = positional[0]?.toLowerCase() ?? "none";
+  if (executable === "npm" && operation === "run") operation = `run:${positional[1]?.toLowerCase() ?? "unknown"}`;
+  else if (["python", "python3", "py"].includes(executable)) operation = `script:${positional[0]?.toLowerCase() ?? "interactive"}`;
+  else if (executable === "pytest") operation = `target:${positional[0]?.toLowerCase() ?? "all"}`;
+  else if (executable === "git" || executable === "cargo") operation = positional[0]?.toLowerCase() ?? "none";
   return {
-    executable: tokens[0]?.toLowerCase() ?? "unknown",
-    operation: tokens.find((token, index) => index > 0 && !token.startsWith("-"))?.toLowerCase() ?? "none",
+    executable,
+    operation,
     argumentStructure: tokens.slice(1).map((token) => token.startsWith("-") ? token.replace(/=.*/, "=<value>") : "<arg>"),
   };
 }
@@ -93,9 +100,11 @@ export class StateTracker {
         consecutiveFailures: 0,
         repeatedFailureCount: 0,
         editChurn: 0,
+        editOscillationCount: 0,
         turnsSinceIntervention: Number.MAX_SAFE_INTEGER,
       },
     };
+    this.refreshDerivedCounters();
     this.lastFailureFingerprint = snapshot?.lastFailureFingerprint;
     this.lastAssessmentKey = snapshot?.lastAssessmentKey;
     this.assessedThisTurn = snapshot?.assessedThisTurn ?? false;
@@ -135,11 +144,12 @@ export class StateTracker {
 
   recordToolCall(tool: string, input: unknown): void {
     this.push({
-      kind: isEditTool(tool) ? "edit" : "tool_call",
+      kind: "tool_call",
       tool: truncate(tool, 80),
       summary: eventSummary(this.contentPolicy, "call", input),
       timestamp: Date.now(),
     });
+    this.refreshDerivedCounters();
   }
 
   recordToolResult(tool: string, input: unknown, isError: boolean, content: unknown, details?: unknown): void {
@@ -156,15 +166,11 @@ export class StateTracker {
 
     if (failed) {
       this.state.counters.consecutiveFailures += 1;
-      this.state.counters.repeatedFailureCount = this.lastFailureFingerprint === fingerprint
-        ? this.state.counters.repeatedFailureCount + 1
-        : 1;
       this.lastFailureFingerprint = fingerprint;
     } else {
       this.state.counters.consecutiveFailures = 0;
       this.state.counters.repeatedFailureCount = 0;
     }
-    if (isEditTool(tool)) this.state.counters.editChurn += 1;
 
     this.push({
       kind: isEditTool(tool) ? "edit" : "tool_result",
@@ -174,6 +180,12 @@ export class StateTracker {
       summary: eventSummary(this.contentPolicy, "result", content, failed),
       timestamp: Date.now(),
     });
+    if (failed) {
+      this.state.counters.repeatedFailureCount = this.state.recentEvents
+        .filter((event) => event.ok === false && event.fingerprint === fingerprint)
+        .length;
+    }
+    this.refreshDerivedCounters();
 
     if (tool === "goal_control" && !failed) delete this.state.completionAttempt;
   }
@@ -217,6 +229,24 @@ export class StateTracker {
 
   private push(event: RecentEvent): void {
     this.state.recentEvents = boundedEvents([...this.state.recentEvents, event], this.stateWindow);
+  }
+
+  private refreshDerivedCounters(): void {
+    this.state.counters.editChurn = this.state.recentEvents.filter((event) => event.kind === "edit").length;
+    let previousFailure: string | undefined;
+    let editedSinceFailure = false;
+    let oscillations = 0;
+    for (const event of this.state.recentEvents) {
+      if (event.kind === "edit") {
+        editedSinceFailure = true;
+        continue;
+      }
+      if (event.ok !== false || !event.fingerprint) continue;
+      if (editedSinceFailure && event.fingerprint === previousFailure) oscillations += 1;
+      previousFailure = event.fingerprint;
+      editedSinceFailure = false;
+    }
+    this.state.counters.editOscillationCount = oscillations;
   }
 }
 

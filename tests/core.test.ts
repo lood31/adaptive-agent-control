@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TypeSafeClient } from "@typesafe-ai/sdk";
 import { stableHash, stableStringify } from "../src/core/hash.js";
+import { classifyOutcome, emptyOutcomeEvidence, recordOutcomeResult } from "../src/core/outcome.js";
 import { decideAction } from "../src/core/policy.js";
 import { StateTracker } from "../src/core/state-builder.js";
 import { triggerFor } from "../src/core/trigger-engine.js";
@@ -42,15 +43,67 @@ test("state tracker counts repeated failures and redacts sensitive snippets", ()
   assert.equal(JSON.stringify(current).includes("super-secret"), false);
 });
 
-test("failure fingerprint distinguishes command operations with the same shape", () => {
+test("failure fingerprint distinguishes canonical CLI operations", () => {
+  const pairs = [
+    ["npm run test", "npm run build"],
+    ["git status", "git checkout main"],
+    ["python scripts/a.py", "python scripts/b.py"],
+    ["pytest tests/a.test", "pytest tests/b.test"],
+    ["cargo test", "cargo build"],
+  ];
+  for (const [left, right] of pairs) {
+    const tracker = new StateTracker("test", 12);
+    tracker.recordToolResult("bash", { command: left }, true, "syntax error", { exitCode: 1 });
+    tracker.recordToolResult("bash", { command: right }, true, "syntax error", { exitCode: 1 });
+    const current = tracker.getState();
+    assert.equal(current.counters.consecutiveFailures, 2);
+    assert.equal(current.counters.repeatedFailureCount, 1);
+    assert.notEqual(current.recentEvents[0]?.fingerprint, current.recentEvents[1]?.fingerprint);
+  }
+  const tracker = new StateTracker("privacy", 12);
+  tracker.recordToolResult("bash", { command: "npm run test" }, true, "syntax error", { exitCode: 1 });
+  assert.equal(JSON.stringify(tracker.snapshot()).includes("npm run test"), false);
+});
+
+test("repeated failure history survives unrelated successful tools", () => {
   const tracker = new StateTracker("test", 12);
-  tracker.recordToolResult("bash", { command: "npm test" }, true, "syntax error", { exitCode: 1 });
-  tracker.recordToolResult("bash", { command: "git status" }, true, "syntax error", { exitCode: 1 });
+  const failure = () => tracker.recordToolResult("bash", { command: "npm run test" }, true, "syntax error", { exitCode: 1 });
+  failure();
+  tracker.recordToolResult("read", { path: "package.json" }, false, "contents");
+  assert.equal(tracker.getState().counters.repeatedFailureCount, 0);
+  failure();
   const current = tracker.getState();
-  assert.equal(current.counters.consecutiveFailures, 2);
-  assert.equal(current.counters.repeatedFailureCount, 1);
-  assert.notEqual(current.recentEvents[0]?.fingerprint, current.recentEvents[1]?.fingerprint);
-  assert.equal(JSON.stringify(tracker.snapshot()).includes("npm test"), false);
+  assert.equal(current.counters.consecutiveFailures, 1);
+  assert.equal(current.counters.repeatedFailureCount, 2);
+  assert.equal(triggerFor("trajectory", current, config).reason, "repeated_failure");
+});
+
+test("edit churn is windowed and repeated edit-failure cycles are detected", () => {
+  const tracker = new StateTracker("test", 6);
+  tracker.setPlan({ active: true });
+  tracker.recordToolResult("edit", { path: "src/a.ts" }, false, "edited");
+  tracker.recordToolResult("bash", { command: "npm run test" }, true, "syntax error", { exitCode: 1 });
+  tracker.recordToolResult("edit", { path: "src/a.ts" }, false, "edited again");
+  tracker.recordToolResult("bash", { command: "npm run test" }, true, "syntax error", { exitCode: 1 });
+  assert.equal(tracker.getState().counters.editOscillationCount, 1);
+  assert.equal(triggerFor("trajectory", tracker.getState(), config).reason, "edit_failure_oscillation");
+
+  for (let index = 0; index < 6; index += 1) {
+    tracker.recordToolResult("read", { path: `src/${index}.ts` }, false, "contents");
+  }
+  assert.equal(tracker.getState().counters.editChurn, 0);
+  assert.equal(tracker.getState().counters.editOscillationCount, 0);
+  assert.equal(triggerFor("trajectory", tracker.getState(), config).shouldAssess, false);
+});
+
+test("post-decision outcome requires a bounded body of evidence", () => {
+  let evidence = emptyOutcomeEvidence();
+  evidence = recordOutcomeResult(evidence, true, -2);
+  assert.equal(classifyOutcome(evidence).label, "inconclusive");
+  evidence = recordOutcomeResult(evidence, true, 0);
+  const outcome = classifyOutcome(evidence);
+  assert.equal(outcome.label, "improved");
+  assert.equal(outcome.evidence.observedToolResults, 2);
 });
 
 test("metadata-only policy omits tool and completion snippets", () => {
