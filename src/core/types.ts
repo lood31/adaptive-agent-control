@@ -9,6 +9,8 @@ export type ControlMode = (typeof CONTROL_MODES)[number];
 
 export const CONTENT_POLICIES = ["metadata-only", "redacted-snippets", "full-local-only"] as const;
 export type ContentPolicy = (typeof CONTENT_POLICIES)[number];
+export const CONTROL_PROVIDERS = ["typesafe", "vercel", "mock"] as const;
+export type ControlProvider = (typeof CONTROL_PROVIDERS)[number];
 
 export interface GoalSnapshot {
   id?: string;
@@ -165,7 +167,7 @@ export interface Thresholds {
 
 export interface AdaptiveConfig {
   mode: ControlMode;
-  provider: "typesafe" | "mock";
+  provider: ControlProvider;
   model: string;
   timeoutMs: number;
   maxRetries: number;

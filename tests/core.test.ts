@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { TypeSafeClient } from "@typesafe-ai/sdk";
 import { stableHash, stableStringify } from "../src/core/hash.js";
@@ -7,8 +10,10 @@ import { decideAction } from "../src/core/policy.js";
 import { StateTracker } from "../src/core/state-builder.js";
 import { triggerFor } from "../src/core/trigger-engine.js";
 import type { AdaptiveConfig, ObservedState } from "../src/core/types.js";
-import { DEFAULT_CONFIG } from "../src/pi/config.js";
+import { DEFAULT_CONFIG, loadConfig } from "../src/pi/config.js";
 import { TypeSafeJevProvider } from "../src/providers/typesafe-jev.js";
+import { VercelJevProvider } from "../src/providers/vercel-jev.js";
+import type { VercelEvaluateRequest } from "../src/providers/vercel-jev.js";
 
 const config: AdaptiveConfig = {
   ...structuredClone(DEFAULT_CONFIG),
@@ -148,6 +153,23 @@ test("policy selects reflection, replan, and verification at thresholds", () => 
   assert.equal(verification.action, "VERIFY");
 });
 
+test("Vercel config selects the Gateway Jev model by default", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "aac-config-"));
+  const piDir = join(cwd, ".pi");
+  const configPath = join(piDir, "adaptive-control.json");
+  mkdirSync(piDir);
+  writeFileSync(configPath, JSON.stringify({ provider: "vercel" }));
+  try {
+    const loaded = loadConfig(cwd);
+    assert.equal(loaded.provider, "vercel");
+    assert.equal(loaded.model, "typesafe-ai/jev");
+  } finally {
+    unlinkSync(configPath);
+    rmdirSync(piDir);
+    rmdirSync(cwd);
+  }
+});
+
 test("TypeSafe provider maps Jev answers and sends bounded state", async () => {
   let requestState: unknown;
   const fakeClient = {
@@ -175,4 +197,39 @@ test("TypeSafe provider maps Jev answers and sends bounded state", async () => {
   assert.equal(JSON.stringify(requestState).includes("super-secret"), false);
   assert.equal(JSON.stringify(requestState).includes("agent-secret"), false);
   assert.equal(JSON.stringify(requestState).includes("untrusted_agent_hypothesis"), true);
+});
+
+test("Vercel provider maps Gateway boolean answers and preserves privacy policy", async () => {
+  let captured: VercelEvaluateRequest | undefined;
+  const provider = new VercelJevProvider({
+    model: "typesafe-ai/jev",
+    timeoutMs: 2_000,
+    maxRetries: 0,
+    evaluator: async (request) => {
+      captured = request;
+      return {
+        answers: {
+          makingProgress: { type: "boolean", probability: 0.2 },
+          stuck: { type: "boolean", probability: 0.91 },
+          planStale: { type: "boolean", probability: 0.4 },
+          reflectionLikelyHelpful: { type: "boolean", probability: 0.86 },
+        },
+        usage: { inputTokens: 13, outputTokens: 4 },
+        response: { modelId: "typesafe-ai/jev" },
+      };
+    },
+  });
+  const result = await provider.assess("trajectory", {
+    observedState: state({ goal: { objective: "token=super-secret" } }),
+    agentContext: { hypothesis: "token=agent-secret" },
+  });
+  assert.equal(result.provider, "vercel");
+  assert.equal(result.signals.stuck, 0.91);
+  assert.equal(result.signals.reflectionLikelyHelpful, 0.86);
+  assert.equal(result.usage?.inputTokens, 13);
+  assert.equal(captured?.model, "typesafe-ai/jev");
+  assert.equal(captured?.questions.stuck?.type, "boolean");
+  assert.equal(JSON.stringify(captured?.state).includes("super-secret"), false);
+  assert.equal(JSON.stringify(captured?.state).includes("agent-secret"), false);
+  assert.equal(JSON.stringify(captured?.state).includes("untrusted_agent_hypothesis"), true);
 });

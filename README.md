@@ -2,7 +2,7 @@
 
 Pi Agent 的自适应控制平面：Decision Provider 只产出窄信号，确定性 policy 负责动作仲裁。
 
-**v0.2.1** 提供 Pi Extension、三个可移植 Skill，以及可替换的 TypeSafe Jev provider。项目的核心不是“让小模型决定下一步”，而是把 `trajectory → signals → policy → recommendation → post-decision outcome` 做成可观察、可回放的控制闭环。
+**v0.2.2** 提供 Pi Extension、三个可移植 Skill，以及 TypeSafe 直连和 Vercel AI Gateway 两种 Jev adapter。项目的核心不是“让小模型决定下一步”，而是把 `trajectory → signals → policy → recommendation → post-decision outcome` 做成可观察、可回放的控制闭环。
 
 ## 控制链
 
@@ -46,7 +46,7 @@ completionSupported
 - `observedState`：controller 从 runtime 收集的观测；
 - `agentContext`：`control_assess` 传入的 `hypothesis` / `evidence`，明确标记为 **untrusted agent hypothesis**。
 
-agent 自报内容只能补充判断，不能升级为 runtime evidence。TypeSafe Jev 是默认 adapter，不是控制器本身。
+agent 自报内容只能补充判断，不能升级为 runtime evidence。`typesafe` 是默认 adapter；也可选择 `vercel`，通过 Vercel AI Gateway 调用同一个 Jev。两种 adapter 共享问题定义、内容策略和 deterministic policy。
 
 ## 失败指纹
 
@@ -71,7 +71,7 @@ bash identity 包含 executable、canonical operation 和参数结构。v0.2.1 �
 | `redacted-snippets` | 最多 240 字符的脱敏片段 | 同样的有界脱敏片段 |
 | `full-local-only` | 当前实现仍仅保留有界本地摘要 | 仅元数据 |
 
-`full-local-only` 的名字表达“内容不得离开本地”，并不承诺 AAC 持久化完整文件。API key 只从 `TYPESAFE_API_KEY` 读取，不写入 session。
+`full-local-only` 的名字表达“内容不得离开本地”，并不承诺 AAC 持久化完整文件。TypeSafe 直连读取 `TYPESAFE_API_KEY`；Vercel Gateway 读取 `AI_GATEWAY_API_KEY`（或 Vercel OIDC）。凭据不写入 session。
 
 ## 窗口信号与 Shadow telemetry
 
@@ -103,25 +103,31 @@ pi install .
 /adaptive-control mode enforce
 ```
 
-项目配置 `.pi/adaptive-control.json`：
+项目配置 `.pi/adaptive-control.json`。TypeSafe 直连：
 
 ```json
 {
   "mode": "assist",
+  "provider": "typesafe",
   "model": "jev-latest",
-  "timeoutMs": 2000,
-  "cooldownTurns": 2,
-  "contentPolicy": "redacted-snippets",
-  "thresholds": {
-    "stuck": 0.8,
-    "planStale": 0.8,
-    "reflectionHelpful": 0.7,
-    "completionSupported": 0.8
-  }
+  "contentPolicy": "redacted-snippets"
 }
 ```
 
-provider 超时或报错时 fail-open；默认 2 秒超时、0 次重试。
+Vercel AI Gateway：
+
+```json
+{
+  "mode": "assist",
+  "provider": "vercel",
+  "model": "typesafe-ai/jev",
+  "contentPolicy": "redacted-snippets"
+}
+```
+
+省略 `model` 时会按 provider 选择上述默认值。其他配置包括 `timeoutMs`、`maxRetries`、`cooldownTurns`、`stateWindow` 和 `thresholds`。provider 超时或报错时 fail-open；默认 2 秒超时、0 次重试。
+
+Vercel adapter 使用 AI SDK 7 的 experimental evaluation API，因此需要 **Node.js 22+**。Jev 在 Gateway 上是计费模型；账户赠送额度可抵扣用量，但不等于永久免费。
 
 ## Skills
 
@@ -142,4 +148,4 @@ npm pack --dry-run
 
 `eval/cases.jsonl` 当前包含 32 条带标签 trajectory cases，并报告 intervention precision/recall、false/missed intervention rate 和 action preferred-match。它们用于验证 deterministic policy 与标注 schema，**不证明 AAC 对真实 agent 有效，也不证明 Jev signal quality**。下一步评估应使用脱敏真实轨迹、人工复标和离线 policy/provider replay。
 
-设计文档：[v0.2](./TECHNICAL_DESIGN_v0.2.md) · [v0.2.1 measurement integrity](./TECHNICAL_DESIGN_v0.2.1.md)
+设计文档：[v0.2](./TECHNICAL_DESIGN_v0.2.md) · [v0.2.1 measurement integrity](./TECHNICAL_DESIGN_v0.2.1.md) · [v0.2.2 dual Jev adapters](./TECHNICAL_DESIGN_v0.2.2.md)

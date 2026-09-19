@@ -9,6 +9,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Static } from "typebox";
 import { TypeSafeJevProvider } from "../providers/typesafe-jev.js";
+import { VercelJevProvider } from "../providers/vercel-jev.js";
 import { makeAssessment, makeFailOpenAssessment } from "../core/policy.js";
 import {
   advanceOutcomeTurn,
@@ -393,15 +394,26 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
   };
 
   function getProvider(): DecisionProvider {
-    if (!provider) {
-      provider = options.providerFactory?.(config) ?? (config.provider === "mock"
-        ? { assess: async () => ({ signals: {}, provider: "mock", model: config.model }) }
-        : new TypeSafeJevProvider({
-          model: config.model,
-          timeoutMs: config.timeoutMs,
-          maxRetries: config.maxRetries,
-          contentPolicy: config.contentPolicy,
-        }));
+    if (provider) return provider;
+    const custom = options.providerFactory?.(config);
+    if (custom) {
+      provider = custom;
+    } else if (config.provider === "mock") {
+      provider = { assess: async () => ({ signals: {}, provider: "mock", model: config.model }) };
+    } else if (config.provider === "vercel") {
+      provider = new VercelJevProvider({
+        model: config.model,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
+        contentPolicy: config.contentPolicy,
+      });
+    } else {
+      provider = new TypeSafeJevProvider({
+        model: config.model,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
+        contentPolicy: config.contentPolicy,
+      });
     }
     return provider;
   }

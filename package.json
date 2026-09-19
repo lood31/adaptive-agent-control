@@ -1,6 +1,6 @@
 {
   "name": "adaptive-agent-control",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A provider-neutral adaptive control plane for Pi agents",
   "type": "module",
   "keywords": [
@@ -9,7 +9,7 @@
     "agent-control"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "exports": {
     ".": {
@@ -23,6 +23,10 @@
     "./providers/typesafe-jev": {
       "types": "./dist/src/providers/typesafe-jev.d.ts",
       "import": "./dist/src/providers/typesafe-jev.js"
+    },
+    "./providers/vercel-jev": {
+      "types": "./dist/src/providers/vercel-jev.d.ts",
+      "import": "./dist/src/providers/vercel-jev.js"
     }
   },
   "scripts": {
@@ -40,6 +44,7 @@
     "TECHNICAL_DESIGN_v0.1.md",
     "TECHNICAL_DESIGN_v0.2.md",
     "TECHNICAL_DESIGN_v0.2.1.md",
+    "TECHNICAL_DESIGN_v0.2.2.md",
     "README.md",
     "package.json"
   ],
@@ -52,7 +57,9 @@
     ]
   },
   "dependencies": {
-    "@typesafe-ai/sdk": "^0.6.0"
+    "@typesafe-ai/sdk": "^0.6.0",
+    "ai": "7.0.107",
+    "zod": "^4.6.5"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

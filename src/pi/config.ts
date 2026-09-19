@@ -1,13 +1,19 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { POLICY_SPEC } from "../core/policy.js";
-import type { AdaptiveConfig, ContentPolicy, ControlMode, Thresholds } from "../core/types.js";
-import { CONTENT_POLICIES, CONTROL_MODES } from "../core/types.js";
+import type { AdaptiveConfig, ContentPolicy, ControlMode, ControlProvider, Thresholds } from "../core/types.js";
+import { CONTENT_POLICIES, CONTROL_MODES, CONTROL_PROVIDERS } from "../core/types.js";
+
+const DEFAULT_MODELS: Record<ControlProvider, string> = {
+  typesafe: "jev-latest",
+  vercel: "typesafe-ai/jev",
+  mock: "mock",
+};
 
 export const DEFAULT_CONFIG: AdaptiveConfig = {
   mode: "observe",
   provider: "typesafe",
-  model: "jev-latest",
+  model: DEFAULT_MODELS.typesafe,
   timeoutMs: 2000,
   maxRetries: 0,
   cooldownTurns: 2,
@@ -25,6 +31,12 @@ function numberOr(value: unknown, fallback: number, min = 0, max = 1): number {
 function modeOr(value: unknown, fallback: ControlMode): ControlMode {
   return typeof value === "string" && (CONTROL_MODES as readonly string[]).includes(value)
     ? value as ControlMode
+    : fallback;
+}
+
+function providerOr(value: unknown, fallback: ControlProvider): ControlProvider {
+  return typeof value === "string" && (CONTROL_PROVIDERS as readonly string[]).includes(value)
+    ? value as ControlProvider
     : fallback;
 }
 
@@ -49,11 +61,12 @@ export function loadConfig(cwd: string): AdaptiveConfig {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     const input = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+    const provider = providerOr(input.provider, DEFAULT_CONFIG.provider);
     return {
       ...DEFAULT_CONFIG,
       mode: modeOr(input.mode, DEFAULT_CONFIG.mode),
-      provider: input.provider === "mock" ? "mock" : "typesafe",
-      model: typeof input.model === "string" && input.model.trim() ? input.model.trim() : DEFAULT_CONFIG.model,
+      provider,
+      model: typeof input.model === "string" && input.model.trim() ? input.model.trim() : DEFAULT_MODELS[provider],
       timeoutMs: numberOr(input.timeoutMs, DEFAULT_CONFIG.timeoutMs, 100, 60_000),
       maxRetries: Math.round(numberOr(input.maxRetries, DEFAULT_CONFIG.maxRetries, 0, 3)),
       cooldownTurns: Math.round(numberOr(input.cooldownTurns, DEFAULT_CONFIG.cooldownTurns, 0, 20)),
