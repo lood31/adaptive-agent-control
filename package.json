@@ -32,7 +32,6 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/tests/core.test.js dist/tests/extension.test.js dist/tests/session-store.test.js",
     "eval:fixtures": "npm run build && node dist/eval/score.js",
@@ -52,7 +51,7 @@
   ],
   "pi": {
     "extensions": [
-      "./dist/src/pi/index.js"
+      "./src/pi/index.ts"
     ],
     "skills": [
       "./skills"
