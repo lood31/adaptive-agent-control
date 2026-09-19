@@ -98,7 +98,15 @@ export interface DecisionProvider {
   ): Promise<ProviderAssessment>;
 }
 
+export interface ProviderFailureDiagnostics {
+  httpStatus?: number;
+  errorTypes: string[];
+  localTimeout: boolean;
+  callerAborted: boolean;
+}
+
 export interface Assessment {
+  failureDiagnostics?: ProviderFailureDiagnostics;
   check: ControlCheck;
   trigger: string;
   signals: Partial<SignalSet>;

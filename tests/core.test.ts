@@ -8,6 +8,8 @@ import { stableHash, stableStringify } from "../src/core/hash.js";
 import { classifyOutcome, emptyOutcomeEvidence, recordOutcomeResult } from "../src/core/outcome.js";
 import { decideAction } from "../src/core/policy.js";
 import { StateTracker } from "../src/core/state-builder.js";
+import { redactText } from "../src/core/redaction.js";
+import { outboundContext } from "../src/providers/jev-context.js";
 import { triggerFor } from "../src/core/trigger-engine.js";
 import type { AdaptiveConfig, ObservedState } from "../src/core/types.js";
 import { DEFAULT_CONFIG, loadConfig } from "../src/pi/config.js";
@@ -46,6 +48,52 @@ test("state tracker counts repeated failures and redacts sensitive snippets", ()
   assert.equal(current.counters.repeatedFailureCount, 2);
   assert.equal(triggerFor("reflection", current, config).shouldAssess, true);
   assert.equal(JSON.stringify(current).includes("super-secret"), false);
+});
+
+test("secret text is redacted before bounding local and outbound snippets", () => {
+  for (const text of [
+    '{"api_key":"FAKE_REVIEW_SECRET"}',
+    "{'password': 'FAKE_REVIEW_SECRET with spaces'}",
+    'API_KEY="FAKE_REVIEW_SECRET"',
+    'Authorization: Bearer FAKE_REVIEW_SECRET',
+    'cookie="FAKE_REVIEW_SECRET"',
+    `${"x".repeat(220)} api_key="FAKE_REVIEW_SECRET"`,
+  ]) {
+    assert.ok(!redactText(text).includes("FAKE"));
+    const tracker = new StateTracker("privacy");
+    tracker.recordToolResult("read", {}, false, [{ type: "text", text }]);
+    assert.ok(!JSON.stringify(tracker.snapshot()).includes("FAKE"));
+    assert.ok(!JSON.stringify(outboundContext({ observedState: tracker.getState() }, "redacted-snippets")).includes("FAKE"));
+  }
+  assert.equal(redactText("ordinary test output"), "ordinary test output");
+});
+
+test("outbound trajectory keeps the newest eight events in order", () => {
+  const tracker = new StateTracker("tail");
+  for (let i = 1; i <= 12; i++) tracker.recordToolResult("bash", {}, false, `event-${i}`);
+  const remote = outboundContext({ observedState: tracker.getState() }, "redacted-snippets") as { observedState: ObservedState };
+  assert.deepEqual(remote.observedState.recentEvents.map((event) => event.summary),
+    Array.from({ length: 8 }, (_, i) => `event-${i + 5}`));
+  assert.equal(tracker.getState().recentEvents.length, 12);
+});
+
+test("metadata-only strips new and restored goal and plan content", () => {
+  const original = new StateTracker("privacy");
+  original.setGoal({ id: "goal-1", status: "active", objective: "PRIVATE objective", successCriteria: ["PRIVATE criterion"] });
+  original.setPlan({ active: true, requirement: "PRIVATE requirement", planFilePath: "PRIVATE/path" });
+  original.recordToolResult("read", {}, false, "PRIVATE output");
+  original.recordCompletionAttempt("PRIVATE evidence", ["PRIVATE criterion"]);
+  const snapshot = original.snapshot();
+  const restored = new StateTracker("privacy", 12, snapshot, "metadata-only");
+  const fresh = new StateTracker("privacy", 12, undefined, "metadata-only");
+  fresh.setGoal(original.getState().goal);
+  fresh.setPlan(original.getState().plan);
+  for (const tracker of [restored, fresh]) {
+    assert.ok(!JSON.stringify(tracker.snapshot()).includes("PRIVATE"));
+    assert.deepEqual(tracker.getState().goal, { id: "goal-1", status: "active", successCriteria: ["criterion omitted"] });
+    assert.deepEqual(tracker.getState().plan, { active: true });
+  }
+  assert.ok(JSON.stringify(snapshot).includes("PRIVATE"));
 });
 
 test("failure fingerprint distinguishes canonical CLI operations", () => {

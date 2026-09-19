@@ -10,9 +10,10 @@ export function truncate(value: string, max = MAX_TEXT): string {
 }
 
 export function redactText(value: string): string {
-  return truncate(value)
-    .replace(/(bearer\s+)[^\s]+/gi, "$1[REDACTED]")
-    .replace(/(token|secret|password|api[_-]?key)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
+  // Redact before truncating: a boundary must not expose a partial secret.
+  return truncate(value
+    .replace(/(bearer\s+)[^\s"',;]+/gi, "$1[REDACTED]")
+    .replace(/((?:["']?)(?:[\w-]*(?:token|secret|password|api[_-]?key|authorization|cookie|credential)[\w-]*)(?:["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\r\n}]+)/gi, "$1[REDACTED]"));
 }
 
 export function redactValue(value: unknown, depth = 0): RedactedValue {

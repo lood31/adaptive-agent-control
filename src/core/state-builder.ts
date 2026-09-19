@@ -92,7 +92,7 @@ export class StateTracker {
     this.stateWindow = Math.max(1, stateWindow);
     this.contentPolicy = contentPolicy;
     this.fingerprintKey = snapshot?.fingerprintKey ?? randomBytes(32).toString("hex");
-    this.state = snapshot?.state ?? {
+    this.state = snapshot ? structuredClone(snapshot.state) : {
       schemaVersion: 1,
       sessionId,
       recentEvents: [],
@@ -104,6 +104,15 @@ export class StateTracker {
         turnsSinceIntervention: Number.MAX_SAFE_INTEGER,
       },
     };
+    // Apply the current policy to restored snapshots as well as new observations.
+    this.setGoal(this.state.goal);
+    this.setPlan(this.state.plan);
+    if (this.contentPolicy === "metadata-only") {
+      this.state.recentEvents = this.state.recentEvents.map((event) => ({
+        ...event, summary: "content omitted",
+      }));
+      if (this.state.completionAttempt) this.recordCompletionAttempt(undefined, this.state.completionAttempt.criteria);
+    }
     this.refreshDerivedCounters();
     this.lastFailureFingerprint = snapshot?.lastFailureFingerprint;
     this.lastAssessmentKey = snapshot?.lastAssessmentKey;
@@ -133,12 +142,20 @@ export class StateTracker {
   }
 
   setGoal(goal: GoalSnapshot | undefined): void {
-    if (goal) this.state.goal = structuredClone(goal);
+    if (goal) this.state.goal = this.contentPolicy === "metadata-only"
+      ? {
+        ...(goal.id ? { id: goal.id } : {}),
+        ...(goal.status ? { status: goal.status } : {}),
+        ...(goal.successCriteria ? { successCriteria: goal.successCriteria.slice(0, 8).map(() => "criterion omitted") } : {}),
+      }
+      : structuredClone(goal);
     else delete this.state.goal;
   }
 
   setPlan(plan: PlanSnapshot | undefined): void {
-    if (plan) this.state.plan = structuredClone(plan);
+    if (plan) this.state.plan = this.contentPolicy === "metadata-only"
+      ? { active: plan.active }
+      : structuredClone(plan);
     else delete this.state.plan;
   }
 

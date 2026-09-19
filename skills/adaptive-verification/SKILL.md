@@ -13,6 +13,6 @@ Use this skill to replace completion claims with a claim-to-evidence check.
 4. Call `control_assess` with `check: "completion"` when the tool is available.
 5. Complete only when every item is supported; otherwise report the exact missing evidence and continue.
 
-If `control_assess` is unavailable, perform the same rubric manually and label the result **unassessed by a Decision Provider**.
+If `control_assess` is unavailable, fails, or returns empty signals / `provider_error:*` (including disabled or cooldown assessments), perform the same rubric manually and label the result **unassessed by a Decision Provider**. A fail-open `CONTINUE` is not a verification pass. Finish only on current evidence; do not repeatedly retry the provider to obtain approval.
 
 Self-report, an intended implementation, an old test run, and an expected output are not current evidence. Do not suppress failures or fabricate a passing result.

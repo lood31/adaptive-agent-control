@@ -10,6 +10,7 @@ import { Type } from "typebox";
 import type { Static } from "typebox";
 import { TypeSafeJevProvider } from "../providers/typesafe-jev.js";
 import { VercelJevProvider } from "../providers/vercel-jev.js";
+import { DiagnosedProviderError } from "../providers/provider-diagnostics.js";
 import { makeAssessment, makeFailOpenAssessment } from "../core/policy.js";
 import {
   advanceOutcomeTurn,
@@ -113,6 +114,7 @@ export function registerAdaptiveControl(
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    runtime.ensure(ctx);
     runtime.recordToolCall(event);
     if (event.toolName !== "goal_control") return undefined;
     const input = event.input as Record<string, unknown>;
@@ -120,6 +122,7 @@ export function registerAdaptiveControl(
     const goal = runtime.tracker.getState().goal;
     runtime.tracker.recordCompletionAttempt(input.evidence ?? input.claimedEvidence, input.successCriteria ?? goal?.successCriteria);
     const assessment = await runtime.assess("completion", ctx.signal, true, "completion_attempt");
+    await deliverAdvice();
     if (runtime.config.mode === "enforce" && assessment.action === "VERIFY") {
       return {
         block: true,
@@ -130,12 +133,14 @@ export function registerAdaptiveControl(
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    runtime.ensure(ctx);
     runtime.recordToolResult(event);
-    if (runtime.config.mode === "off" || !runtime.tracker.canAssess() || inCooldown(runtime.tracker.getState(), runtime.config)) {
-      return undefined;
+    if (runtime.config.mode !== "off" && runtime.tracker.canAssess() && !inCooldown(runtime.tracker.getState(), runtime.config)) {
+      const trigger = triggerFor("trajectory", runtime.tracker.getState(), runtime.config);
+      if (trigger.shouldAssess) await runtime.assess("trajectory", ctx.signal, false, trigger.reason);
     }
-    const trigger = triggerFor("trajectory", runtime.tracker.getState(), runtime.config);
-    if (trigger.shouldAssess) await runtime.assess("trajectory", ctx.signal, false, trigger.reason);
+    // Manual assessments also queue advice; cooldown must not delay its delivery.
+    await deliverAdvice();
     return undefined;
   });
 
@@ -152,7 +157,15 @@ export function registerAdaptiveControl(
     runtime.finalizeOutcomes();
     runtime.persist();
   });
-  pi.on("before_agent_start", async () => runtime.consumeAdvice());
+  pi.on("before_agent_start", async (_event, ctx) => {
+    runtime.ensure(ctx);
+    return runtime.consumeAdvice();
+  });
+
+  async function deliverAdvice(): Promise<void> {
+    const advice = await runtime.consumeAdvice();
+    if (advice) pi.sendMessage(advice.message, { deliverAs: "steer" });
+  }
 
   pi.registerCommand("adaptive-control", {
     description: "Show or set Adaptive Agent Control mode",
@@ -231,6 +244,9 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
     },
     ensure(ctx) {
       if (!initialized || tracker.sessionId !== ctx.sessionManager.getSessionId()) runtime.restore(ctx);
+      const external = externalState(ctx.sessionManager.getBranch());
+      tracker.setGoal(external.goal);
+      tracker.setPlan(external.plan);
     },
     recordToolCall(event) {
       if (event.toolName !== "control_assess") tracker.recordToolCall(event.toolName, event.input);
@@ -279,7 +295,14 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
       }
     },
     async assess(check, signal, force, trigger, agentContext) {
-      const state = tracker.getState();
+      let state = tracker.getState();
+      if (check === "completion" && trigger === "agent_requested") {
+        // Build a privacy-filtered assessment snapshot without persisting a completion attempt.
+        // Agent-supplied evidence stays exclusively in untrusted agentContext.
+        const snapshot = new StateTracker(state.sessionId, config.stateWindow, tracker.snapshot(), config.contentPolicy);
+        snapshot.recordCompletionAttempt(undefined, state.goal?.successCriteria);
+        state = snapshot.getState();
+      }
       const stateHash = stableHash({ state, agentContext });
       const existing = recentAssessments.find((item) => item.check === check && item.stateHash === stateHash);
       if (existing) return existing;
@@ -300,6 +323,7 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
         assessment = makeAssessment(check, trigger, result, state, config, stateHash, Date.now() - startedAt, Boolean(agentContext));
       } catch (error) {
         assessment = makeFailOpenAssessment(check, trigger, config.provider, config.model, stateHash, errorCode(error), Date.now() - startedAt, Boolean(agentContext));
+        if (error instanceof DiagnosedProviderError) assessment.failureDiagnostics = error.diagnostics;
       }
       const intervened = assessment.action !== "CONTINUE" && (config.mode === "assist" || config.mode === "enforce");
       tracker.markAssessed(check, stateHash, intervened);

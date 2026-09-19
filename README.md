@@ -125,7 +125,7 @@ Vercel AI Gateway：
 }
 ```
 
-省略 `model` 时会按 provider 选择上述默认值。其他配置包括 `timeoutMs`、`maxRetries`、`cooldownTurns`、`stateWindow` 和 `thresholds`。provider 超时或报错时 fail-open；默认 2 秒超时、0 次重试。
+省略 `model` 时会按 provider 选择上述默认值。其他配置包括 `timeoutMs`、`maxRetries`、`cooldownTurns`、`stateWindow` 和 `thresholds`。provider 超时或报错时 fail-open；默认 10 秒超时（Vercel Gateway 首次调用实测可能达到数秒）、0 次重试。
 
 Vercel adapter 使用 AI SDK 7 的 experimental evaluation API，因此需要 **Node.js 22+**。Jev 在 Gateway 上是计费模型；账户赠送额度可抵扣用量，但不等于永久免费。
 

@@ -1,4 +1,5 @@
 import { experimental_evaluate as evaluate } from "ai";
+import { DiagnosedProviderError } from "./provider-diagnostics.js";
 import type { JSONValue } from "ai";
 import type {
   AssessmentContext,
@@ -68,13 +69,18 @@ export class VercelJevProvider implements DecisionProvider {
     }]));
     const timeoutSignal = AbortSignal.timeout(this.timeoutMs);
     const abortSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const result = await this.evaluator({
-      model: this.model,
-      state: outboundContext(context, this.contentPolicy) as EvaluationState,
-      questions,
-      maxRetries: this.maxRetries,
-      abortSignal,
-    });
+    let result: VercelEvaluateResult;
+    try {
+      result = await this.evaluator({
+        model: this.model,
+        state: outboundContext(context, this.contentPolicy) as EvaluationState,
+        questions,
+        maxRetries: this.maxRetries,
+        abortSignal,
+      });
+    } catch (error) {
+      throw new DiagnosedProviderError(error, timeoutSignal.aborted, signal?.aborted ?? false);
+    }
 
     const signals: Partial<SignalSet> = {};
     for (const name of signalNamesFor(check)) {

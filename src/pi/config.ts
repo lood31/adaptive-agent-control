@@ -14,7 +14,7 @@ export const DEFAULT_CONFIG: AdaptiveConfig = {
   mode: "observe",
   provider: "typesafe",
   model: DEFAULT_MODELS.typesafe,
-  timeoutMs: 2000,
+  timeoutMs: 10000,
   maxRetries: 0,
   cooldownTurns: 2,
   stateWindow: 12,

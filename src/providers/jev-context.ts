@@ -18,7 +18,11 @@ export function signalNamesFor(check: ControlCheck): Array<keyof SignalSet> {
 export function outboundContext(context: AssessmentContext, policy: ContentPolicy): object {
   if (policy === "redacted-snippets") {
     return {
-      observedState: redactValue(context.observedState),
+      observedState: redactValue({
+        ...context.observedState,
+        // Generic redaction bounds arrays from the front; trajectories need the tail.
+        recentEvents: context.observedState.recentEvents.slice(-8),
+      }),
       ...(context.agentContext ? {
         agentContext: {
           trust: "untrusted_agent_hypothesis",
