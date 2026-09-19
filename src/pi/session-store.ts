@@ -1,5 +1,5 @@
 import type { CustomEntry, ExtensionAPI, SessionEntry } from "@earendil-works/pi-coding-agent";
-import type { Assessment, ControlMode, GoalSnapshot, PendingAdvice, PlanSnapshot } from "../core/types.js";
+import type { Assessment, ControlMode, GoalSnapshot, PendingAdvice, PlanSnapshot, ShadowTelemetry } from "../core/types.js";
 import type { TrackerSnapshot } from "../core/state-builder.js";
 
 export const CONTROL_ENTRY_TYPE = "adaptive-control:v1";
@@ -10,12 +10,14 @@ export interface PersistedControlState {
   tracker: TrackerSnapshot;
   pendingAdvice?: PendingAdvice;
   recentAssessments: Assessment[];
+  shadowTelemetry?: ShadowTelemetry[];
 }
 
 export function appendState(pi: ExtensionAPI, state: PersistedControlState): void {
   pi.appendEntry(CONTROL_ENTRY_TYPE, {
     ...state,
     recentAssessments: state.recentAssessments.slice(-20),
+    ...(state.shadowTelemetry ? { shadowTelemetry: state.shadowTelemetry.slice(-100) } : {}),
   });
 }
 

@@ -2,6 +2,8 @@ import { noul, TypeSafeClient } from "@typesafe-ai/sdk";
 import type { EntryType } from "@typesafe-ai/sdk";
 import { redactValue } from "../core/redaction.js";
 import type {
+  AssessmentContext,
+  ContentPolicy,
   ControlCheck,
   DecisionProvider,
   ObservedState,
@@ -18,6 +20,7 @@ export interface TypeSafeJevOptions {
   model: string;
   timeoutMs: number;
   maxRetries: number;
+  contentPolicy?: ContentPolicy;
   client?: TypeSafeClient;
 }
 
@@ -33,16 +36,18 @@ export class TypeSafeJevProvider implements DecisionProvider {
   private readonly model: string;
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
+  private readonly contentPolicy: ContentPolicy;
   private client: TypeSafeClient | undefined;
 
   constructor(options: TypeSafeJevOptions) {
     this.model = options.model;
     this.timeoutMs = options.timeoutMs;
     this.maxRetries = options.maxRetries;
+    this.contentPolicy = options.contentPolicy ?? "redacted-snippets";
     this.client = options.client;
   }
 
-  async assess(check: ControlCheck, state: ObservedState, signal?: AbortSignal): Promise<ProviderAssessment> {
+  async assess(check: ControlCheck, context: AssessmentContext, signal?: AbortSignal): Promise<ProviderAssessment> {
     const questions = questionsFor(check);
     const requestOptions = {
       timeout: this.timeoutMs,
@@ -51,7 +56,7 @@ export class TypeSafeJevProvider implements DecisionProvider {
     };
     const response = await this.getClient().systemOne(
       {
-        state: redactValue(state) as EntryType,
+        state: outboundContext(context, this.contentPolicy) as EntryType,
         questions,
         model: this.model,
       },
@@ -91,18 +96,57 @@ export class TypeSafeJevProvider implements DecisionProvider {
   }
 }
 
-function questionsFor(check: ControlCheck): Record<string, ReturnType<typeof noul>> {
-  if (check === "completion") {
+function outboundContext(context: AssessmentContext, policy: ContentPolicy): object {
+  if (policy === "redacted-snippets") {
     return {
-      completionSupported: noul(QUESTION_TEXT.completionSupported),
+      observedState: redactValue(context.observedState),
+      ...(context.agentContext ? {
+        agentContext: {
+          trust: "untrusted_agent_hypothesis",
+          value: redactValue(context.agentContext),
+        },
+      } : {}),
     };
   }
 
-  const questions: Record<string, ReturnType<typeof noul>> = {
+  const state: ObservedState = context.observedState;
+  return {
+    observedState: {
+      schemaVersion: state.schemaVersion,
+      sessionId: state.sessionId,
+      goal: state.goal ? {
+        present: true,
+        status: state.goal.status,
+        successCriteriaCount: state.goal.successCriteria?.length ?? 0,
+      } : { present: false },
+      plan: state.plan ? { present: true, active: state.plan.active } : { present: false },
+      recentEvents: state.recentEvents.map((event) => ({
+        kind: event.kind,
+        tool: event.tool,
+        ok: event.ok,
+        fingerprint: event.fingerprint,
+        timestamp: event.timestamp,
+      })),
+      counters: state.counters,
+      completionAttempt: state.completionAttempt ? {
+        present: true,
+        criteriaCount: state.completionAttempt.criteria.length,
+      } : { present: false },
+    },
+    agentContext: context.agentContext ? { present: true, trust: "untrusted_agent_hypothesis", contentOmitted: true } : { present: false },
+  };
+}
+
+function questionsFor(check: ControlCheck): Record<string, ReturnType<typeof noul>> {
+  if (check === "completion") {
+    return { completionSupported: noul(QUESTION_TEXT.completionSupported) };
+  }
+
+  // One call gathers candidate signals; deterministic policy arbitrates actions.
+  return {
     makingProgress: noul(QUESTION_TEXT.makingProgress),
     stuck: noul(QUESTION_TEXT.stuck),
+    planStale: noul(QUESTION_TEXT.planStale),
+    reflectionLikelyHelpful: noul(QUESTION_TEXT.reflectionLikelyHelpful),
   };
-  if (check === "replan") questions.planStale = noul(QUESTION_TEXT.planStale);
-  if (check === "reflection") questions.reflectionLikelyHelpful = noul(QUESTION_TEXT.reflectionLikelyHelpful);
-  return questions;
 }

@@ -20,7 +20,7 @@ export function triggerFor(check: ControlCheck, state: ObservedState, _config: A
     };
   }
 
-  if (check === "replan" && state.plan?.active && state.counters.editChurn >= 4) {
+  if (state.plan?.active && state.counters.editChurn >= 4) {
     return { shouldAssess: true, reason: "high_edit_churn" };
   }
 

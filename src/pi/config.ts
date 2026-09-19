@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { AdaptiveConfig, ControlMode, Thresholds } from "../core/types.js";
-import { CONTROL_MODES } from "../core/types.js";
+import { POLICY_SPEC } from "../core/policy.js";
+import type { AdaptiveConfig, ContentPolicy, ControlMode, Thresholds } from "../core/types.js";
+import { CONTENT_POLICIES, CONTROL_MODES } from "../core/types.js";
 
 export const DEFAULT_CONFIG: AdaptiveConfig = {
   mode: "observe",
@@ -12,12 +13,7 @@ export const DEFAULT_CONFIG: AdaptiveConfig = {
   cooldownTurns: 2,
   stateWindow: 12,
   contentPolicy: "redacted-snippets",
-  thresholds: {
-    stuck: 0.8,
-    planStale: 0.8,
-    reflectionHelpful: 0.7,
-    completionSupported: 0.8,
-  },
+  thresholds: { ...POLICY_SPEC.thresholds },
 };
 
 function numberOr(value: unknown, fallback: number, min = 0, max = 1): number {
@@ -29,6 +25,12 @@ function numberOr(value: unknown, fallback: number, min = 0, max = 1): number {
 function modeOr(value: unknown, fallback: ControlMode): ControlMode {
   return typeof value === "string" && (CONTROL_MODES as readonly string[]).includes(value)
     ? value as ControlMode
+    : fallback;
+}
+
+function contentPolicyOr(value: unknown, fallback: ContentPolicy): ContentPolicy {
+  return typeof value === "string" && (CONTENT_POLICIES as readonly string[]).includes(value)
+    ? value as ContentPolicy
     : fallback;
 }
 
@@ -56,7 +58,7 @@ export function loadConfig(cwd: string): AdaptiveConfig {
       maxRetries: Math.round(numberOr(input.maxRetries, DEFAULT_CONFIG.maxRetries, 0, 3)),
       cooldownTurns: Math.round(numberOr(input.cooldownTurns, DEFAULT_CONFIG.cooldownTurns, 0, 20)),
       stateWindow: Math.round(numberOr(input.stateWindow, DEFAULT_CONFIG.stateWindow, 1, 50)),
-      contentPolicy: "redacted-snippets",
+      contentPolicy: contentPolicyOr(input.contentPolicy, DEFAULT_CONFIG.contentPolicy),
       thresholds: mergeThresholds(input.thresholds),
     };
   } catch {

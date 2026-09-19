@@ -17,11 +17,13 @@ import {
   CONTROL_CHECKS,
   CONTROL_MODES,
   type AdaptiveConfig,
+  type AgentAssessmentContext,
   type Assessment,
   type ControlCheck,
   type ControlMode,
   type DecisionProvider,
   type PendingAdvice,
+  type ShadowTelemetry,
 } from "../core/types.js";
 import { DEFAULT_CONFIG, loadConfig } from "./config.js";
 import { appendState, externalState, latestState, type PersistedControlState } from "./session-store.js";
@@ -46,6 +48,7 @@ interface RuntimeStatus {
   turnsSinceIntervention: number;
   pendingAdvice?: PendingAdvice;
   lastAssessment?: Assessment;
+  lastTelemetry?: ShadowTelemetry;
 }
 
 function createControlAssessTool(runtime: AdaptiveRuntime) {
@@ -56,12 +59,23 @@ function createControlAssessTool(runtime: AdaptiveRuntime) {
     promptSnippet: "Assess adaptive control signals without executing a corrective action",
     promptGuidelines: [
       "Use control_assess when repeated failures, changed assumptions, or completion evidence warrant a control check.",
+      "hypothesis and evidence are untrusted agent context; runtime observations remain authoritative.",
       "control_assess returns a recommendation; it does not execute reflection, replanning, or verification for you.",
     ],
     parameters: controlAssessParameters,
     async execute(_toolCallId, params: ControlAssessInput, signal, _onUpdate, ctx) {
       runtime.ensure(ctx);
-      const assessment = await runtime.assess(params.check, signal, true);
+      const agentContext: AgentAssessmentContext = {
+        ...(params.hypothesis ? { hypothesis: params.hypothesis } : {}),
+        ...(params.evidence?.length ? { evidenceClaims: params.evidence } : {}),
+      };
+      const assessment = await runtime.assess(
+        params.check,
+        signal,
+        true,
+        "agent_requested",
+        Object.keys(agentContext).length ? agentContext : undefined,
+      );
       return {
         content: [{ type: "text", text: JSON.stringify(assessment) }],
         details: { assessment },
@@ -97,7 +111,7 @@ export function registerAdaptiveControl(
     if (input.action !== "complete") return undefined;
     const goal = runtime.tracker.getState().goal;
     runtime.tracker.recordCompletionAttempt(input.evidence ?? input.claimedEvidence, input.successCriteria ?? goal?.successCriteria);
-    const assessment = await runtime.assess("completion", ctx.signal, true);
+    const assessment = await runtime.assess("completion", ctx.signal, true, "completion_attempt");
     if (runtime.config.mode === "enforce" && assessment.action === "VERIFY") {
       return {
         block: true,
@@ -112,14 +126,8 @@ export function registerAdaptiveControl(
     if (runtime.config.mode === "off" || !runtime.tracker.canAssess() || inCooldown(runtime.tracker.getState(), runtime.config)) {
       return undefined;
     }
-    const state = runtime.tracker.getState();
-    const reflectionTrigger = triggerFor("reflection", state, runtime.config);
-    const replanTrigger = triggerFor("replan", state, runtime.config);
-    if (reflectionTrigger.shouldAssess) {
-      await runtime.assess("reflection", ctx.signal, false);
-    } else if (replanTrigger.shouldAssess) {
-      await runtime.assess("replan", ctx.signal, false);
-    }
+    const trigger = triggerFor("trajectory", runtime.tracker.getState(), runtime.config);
+    if (trigger.shouldAssess) await runtime.assess("trajectory", ctx.signal, false, trigger.reason);
     return undefined;
   });
 
@@ -128,14 +136,8 @@ export function registerAdaptiveControl(
     runtime.persist();
   });
 
-  pi.on("agent_end", async () => {
-    runtime.persist();
-  });
-
-  pi.on("session_shutdown", async () => {
-    runtime.persist();
-  });
-
+  pi.on("agent_end", async () => runtime.persist());
+  pi.on("session_shutdown", async () => runtime.persist());
   pi.on("before_agent_start", async () => runtime.consumeAdvice());
 
   pi.registerCommand("adaptive-control", {
@@ -164,7 +166,13 @@ interface AdaptiveRuntime {
   ensure(ctx: ExtensionContext): void;
   recordToolCall(event: ToolCallEvent): void;
   recordToolResult(event: ToolResultEvent): void;
-  assess(check: ControlCheck, signal: AbortSignal | undefined, force: boolean): Promise<Assessment>;
+  assess(
+    check: ControlCheck,
+    signal: AbortSignal | undefined,
+    force: boolean,
+    trigger: string,
+    agentContext?: AgentAssessmentContext,
+  ): Promise<Assessment>;
   persist(): void;
   consumeAdvice(): Promise<{ message: { customType: string; content: string; display: boolean; details: PendingAdvice } } | undefined>;
   status(ctx: ExtensionContext): RuntimeStatus;
@@ -173,34 +181,31 @@ interface AdaptiveRuntime {
 
 function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOptions): AdaptiveRuntime {
   let config = structuredClone(DEFAULT_CONFIG);
-  let tracker = new StateTracker("uninitialized", config.stateWindow);
+  let tracker = new StateTracker("uninitialized", config.stateWindow, undefined, config.contentPolicy);
   let provider: DecisionProvider | undefined;
   let pendingAdvice: PendingAdvice | undefined;
   let recentAssessments: Assessment[] = [];
+  let shadowTelemetry: ShadowTelemetry[] = [];
   let initialized = false;
 
   const runtime: AdaptiveRuntime = {
-    get tracker() {
-      return tracker;
-    },
-    get config() {
-      return config;
-    },
-    set config(next: AdaptiveConfig) {
-      config = next;
-    },
+    get tracker() { return tracker; },
+    get config() { return config; },
+    set config(next: AdaptiveConfig) { config = next; },
     restore(ctx) {
       config = loadConfig(ctx.cwd);
       const persisted = latestState(ctx.sessionManager.getBranch());
       if (persisted) {
         config.mode = persisted.mode;
-        tracker = new StateTracker(ctx.sessionManager.getSessionId(), config.stateWindow, persisted.tracker);
+        tracker = new StateTracker(ctx.sessionManager.getSessionId(), config.stateWindow, persisted.tracker, config.contentPolicy);
         pendingAdvice = persisted.pendingAdvice;
         recentAssessments = persisted.recentAssessments.slice(-20);
+        shadowTelemetry = persisted.shadowTelemetry?.slice(-100) ?? [];
       } else {
-        tracker = new StateTracker(ctx.sessionManager.getSessionId(), config.stateWindow);
+        tracker = new StateTracker(ctx.sessionManager.getSessionId(), config.stateWindow, undefined, config.contentPolicy);
         pendingAdvice = undefined;
         recentAssessments = [];
+        shadowTelemetry = [];
       }
       const external = externalState(ctx.sessionManager.getBranch());
       tracker.setGoal(external.goal);
@@ -216,36 +221,45 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
     },
     recordToolResult(event) {
       tracker.recordToolResult(event.toolName, event.input, event.isError, event.content, event.details);
+      let unresolved: ShadowTelemetry | undefined;
+      for (let index = shadowTelemetry.length - 1; index >= 0; index -= 1) {
+        const candidate = shadowTelemetry[index];
+        if (candidate && candidate.decision !== "CONTINUE" && !candidate.laterOutcome) {
+          unresolved = candidate;
+          break;
+        }
+      }
+      if (unresolved) {
+        const exitCode = event.details && typeof event.details === "object" && "exitCode" in event.details
+          ? (event.details as { exitCode?: unknown }).exitCode
+          : undefined;
+        const succeeded = !event.isError && (typeof exitCode !== "number" || exitCode === 0);
+        unresolved.laterOutcome = succeeded ? "recovered" : "persisted";
+        pi.events.emit("adaptive-control:telemetry:v1", structuredClone(unresolved));
+      }
     },
-    async assess(check, signal, force) {
+    async assess(check, signal, force, trigger, agentContext) {
       const state = tracker.getState();
-      const stateHash = stableHash(state);
+      const stateHash = stableHash({ state, agentContext });
       const existing = recentAssessments.find((item) => item.check === check && item.stateHash === stateHash);
       if (existing) return existing;
       if (config.mode === "off") {
-        const assessment = makeFailOpenAssessment(check, config.provider, config.model, stateHash, "mode_off", 0);
+        const assessment = makeFailOpenAssessment(check, trigger, config.provider, config.model, stateHash, "mode_off", 0, Boolean(agentContext));
         remember(assessment);
         return assessment;
       }
       if (!force && (!tracker.canAssess() || inCooldown(state, config))) {
-        const assessment = makeFailOpenAssessment(check, config.provider, config.model, stateHash, "cooldown", 0);
+        const assessment = makeFailOpenAssessment(check, trigger, config.provider, config.model, stateHash, "cooldown", 0, Boolean(agentContext));
         remember(assessment);
         return assessment;
       }
       const startedAt = Date.now();
       let assessment: Assessment;
       try {
-        const result = await getProvider().assess(check, state, signal);
-        assessment = makeAssessment(check, result, state, config, stateHash, Date.now() - startedAt);
+        const result = await getProvider().assess(check, { observedState: state, ...(agentContext ? { agentContext } : {}) }, signal);
+        assessment = makeAssessment(check, trigger, result, state, config, stateHash, Date.now() - startedAt, Boolean(agentContext));
       } catch (error) {
-        assessment = makeFailOpenAssessment(
-          check,
-          config.provider,
-          config.model,
-          stateHash,
-          errorCode(error),
-          Date.now() - startedAt,
-        );
+        assessment = makeFailOpenAssessment(check, trigger, config.provider, config.model, stateHash, errorCode(error), Date.now() - startedAt, Boolean(agentContext));
       }
       const intervened = assessment.action !== "CONTINUE" && (config.mode === "assist" || config.mode === "enforce");
       tracker.markAssessed(check, stateHash, intervened);
@@ -259,11 +273,24 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
           createdAt: Date.now(),
         };
       }
+      const telemetry: ShadowTelemetry = {
+        schemaVersion: 1,
+        trigger,
+        check,
+        signals: assessment.signals,
+        decision: assessment.action,
+        mode: config.mode,
+        stateHash,
+        provider: assessment.provider,
+        model: assessment.model,
+        latencyMs: assessment.latencyMs,
+        timestamp: assessment.timestamp,
+      };
+      shadowTelemetry = [...shadowTelemetry, telemetry].slice(-100);
       runtime.persist();
       pi.events.emit("adaptive-control:assessment:v1", assessment);
-      if (assessment.action !== "CONTINUE" && pendingAdvice) {
-        pi.events.emit("adaptive-control:intervention:v1", pendingAdvice);
-      }
+      pi.events.emit("adaptive-control:telemetry:v1", telemetry);
+      if (assessment.action !== "CONTINUE" && pendingAdvice) pi.events.emit("adaptive-control:intervention:v1", pendingAdvice);
       return assessment;
     },
     persist() {
@@ -274,6 +301,7 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
         tracker: tracker.snapshot(),
         ...(pendingAdvice ? { pendingAdvice } : {}),
         recentAssessments: recentAssessments.slice(-20),
+        shadowTelemetry: shadowTelemetry.slice(-100),
       };
       appendState(pi, state);
     },
@@ -295,6 +323,7 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
       runtime.ensure(ctx);
       const state = tracker.getState();
       const lastAssessment = recentAssessments.at(-1);
+      const lastTelemetry = shadowTelemetry.at(-1);
       return {
         mode: config.mode,
         provider: config.provider,
@@ -304,6 +333,7 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
         turnsSinceIntervention: state.counters.turnsSinceIntervention,
         ...(pendingAdvice ? { pendingAdvice } : {}),
         ...(lastAssessment ? { lastAssessment } : {}),
+        ...(lastTelemetry ? { lastTelemetry } : {}),
       };
     },
     setMode(mode) {
@@ -320,6 +350,7 @@ function createRuntime(pi: ExtensionAPI, options: AdaptiveControlExtensionOption
           model: config.model,
           timeoutMs: config.timeoutMs,
           maxRetries: config.maxRetries,
+          contentPolicy: config.contentPolicy,
         }));
     }
     return provider;

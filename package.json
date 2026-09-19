@@ -1,6 +1,6 @@
 {
   "name": "adaptive-agent-control",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A provider-neutral adaptive control plane for Pi agents",
   "type": "module",
   "keywords": ["pi-package", "pi-extension", "agent-control"],
@@ -34,6 +34,7 @@
     "eval",
     "skills",
     "TECHNICAL_DESIGN_v0.1.md",
+    "TECHNICAL_DESIGN_v0.2.md",
     "README.md",
     "package.json"
   ],

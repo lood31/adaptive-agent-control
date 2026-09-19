@@ -1,55 +1,106 @@
 # Adaptive Agent Control
 
-Pi Agent 的自适应控制平面：用 TypeSafe Jev 判断"该不该干预"，用确定性代码决定"怎么干预"。
+Pi Agent 的自适应控制平面：Decision Provider 只产出窄信号，确定性 policy 负责动作仲裁。
 
-v0.1 交付一个 Pi 扩展 + 三个可复用 Skill（`adaptive-reflection` / `adaptive-replan` / `adaptive-verification`）。
+**v0.2** 提供 Pi Extension、三个可移植 Skill，以及可替换的 TypeSafe Jev provider。项目的核心不是“让小模型决定下一步”，而是把 `trajectory → signals → policy → intervention → outcome` 做成可观察、可回放的控制闭环。
 
-## 它管什么
-
-Agent 长跑任务时常见三种翻车：
-
-1. 同一个命令失败三次，Agent 换个姿势重试第四次，还是失败。
-2. 目标和范围变了，手里的计划还是旧版，Agent 继续照旧执行。
-3. 任务没做完，Agent 就调用 `goal_control(action="complete")` 声称完成。
-
-前两种靠提示词救不回来（Agent 不知道自己正在绕圈），第三种靠提示词拦不住（它确实认为自己完成了）。所以"该不该干预"交给 Jev 这类 ~100ms 响应的 System One 模型，"干预后做什么"留在确定性代码里。
-
-## Jev 用在哪
-
-三个检查点，每个点向 Jev 发一组窄问题（`noul` 类型，返回 0–1 概率）。问题原文在 `src/providers/typesafe-jev.ts`：
+## 控制链
 
 ```text
-makingProgress:           Is the agent's recent work producing observable progress toward the stated objective?
-stuck:                    Is the agent stuck in repeated low-yield work or recurring failures?
-planStale:                Has new evidence invalidated an important assumption or sequence in the active plan?
-reflectionLikelyHelpful:  Would explicitly examining assumptions likely change the next useful action?
-completionSupported:      Does the available evidence support every stated success criterion for completion?
+Runtime trajectory
+      ↓
+Trigger candidates
+      ↓
+Single provider assessment
+  makingProgress / stuck / planStale / reflectionLikelyHelpful
+      ↓
+Deterministic arbitration
+  REPLAN > REFLECT > CONTINUE
 ```
 
-按检查点组合提问，概率过阈值才动作：
+Reflection 与 Replan 不再争夺调用机会。失败或高 edit churn 只触发一次 `trajectory` assessment；provider 在同一次请求中返回候选信号，policy 统一仲裁：
 
-| 检查点 | 问什么 | 阈值 | 动作 |
-| --- | --- | --- | --- |
-| `reflection` | makingProgress + stuck + reflectionLikelyHelpful | stuck ≥ 0.8 且 reflectionLikelyHelpful ≥ 0.7 | 注入反思建议 |
-| `replan` | makingProgress + stuck + planStale | planStale ≥ 0.8 | 建议重规划 |
-| `completion` | completionSupported | completionSupported < 0.8 | `enforce` 下阻止完成 |
+| 动作 | 规范条件 |
+| --- | --- |
+| `REPLAN` | `stuck ≥ 0.8 && planStale ≥ 0.8` |
+| `REFLECT` | `stuck ≥ 0.8 && reflectionLikelyHelpful ≥ 0.7` |
+| `VERIFY` | `completionSupported < 0.8` |
+| `CONTINUE` | 以上均不满足 |
 
-Jev 只回答窄问题，不做决策。阈值、冷却、干预方式全部写死在 `src/core/policy.ts`，想调行为改代码和配置，不靠改提示词。
+`src/core/policy.ts` 的 `POLICY_SPEC` 是默认 policy 的单一代码来源；配置可以覆盖阈值。README 只描述随当前版本发布的默认值。
 
-一次调用约 100ms。默认 2 秒超时、0 次重试：Jev 超时或报错时 fail-open 放行并记录，外部服务挂了不会锁死 Agent。
+## Provider 边界
 
-### 换掉 Jev
+Jev 只回答窄问题，不直接选择 action：
 
-Jev 只是默认提供方。实现 `DecisionProvider` 接口（`assess(check, state, signal)` 返回信号集）就能换成任何模型，`.pi/adaptive-control.json` 的 `provider` 字段负责切换。内置 adapter 在 `src/providers/typesafe-jev.ts`，本地 mock 直接 `"provider": "mock"`。
+```text
+makingProgress
+stuck
+planStale
+reflectionLikelyHelpful
+completionSupported
+```
 
-## 防抖与隐私
+`DecisionProvider` 接收 `AssessmentContext`：
 
-- 每轮最多 1 次 Jev 请求，状态哈希去重，同一状态不重复提问；
-- 两次干预之间至少隔 `cooldownTurns`（默认 2）轮；
-- 发给 Jev 的状态先脱敏（`src/core/redaction.ts`）：只有边界元数据、截断片段、失败指纹，没有文件内容、diff、凭据、token 或原始请求体；
-- API key 只从环境变量 `TYPESAFE_API_KEY` 读取，不持久化。
+- `observedState`：controller 从 runtime 收集的观测；
+- `agentContext`：`control_assess` 传入的 `hypothesis` / `evidence`，明确标记为 **untrusted agent hypothesis**。
 
-## 安装与使用
+agent 自报内容只能补充判断，不能升级为 runtime evidence。TypeSafe Jev 是默认 adapter，不是控制器本身。
+
+## 失败指纹
+
+v0.2 的 failure fingerprint 使用 session-local keyed HMAC：
+
+```text
+HMAC(sessionKey,
+  tool + normalized operation identity + exit class + error class)
+```
+
+bash identity 包含 executable、operation 和参数结构，因此 `npm test`、`python foo.py`、`git status` 不会仅因 input shape 相同而被计为同一策略。原始 command 不进入 fingerprint 或 telemetry；session key 只随 controller state 保存，用于跨 turn 保持一致。
+
+## 内容与隐私策略
+
+默认策略是 `redacted-snippets`。准确的边界是：AAC 可能向远端 provider 发送**有界、脱敏的最近工具活动片段**；不会发送完整文件、完整 diff、环境变量、凭据或原始请求体。
+
+`.pi/adaptive-control.json` 支持：
+
+| `contentPolicy` | 本地 controller state | 发给远端 provider |
+| --- | --- | --- |
+| `metadata-only` | 仅元数据 | 仅元数据 |
+| `redacted-snippets` | 最多 240 字符的脱敏片段 | 同样的有界脱敏片段 |
+| `full-local-only` | 当前实现仍仅保留有界本地摘要 | 仅元数据 |
+
+`full-local-only` 的名字表达“内容不得离开本地”，并不承诺 AAC 持久化完整文件。API key 只从 `TYPESAFE_API_KEY` 读取，不写入 session。
+
+## Shadow telemetry
+
+每次 assessment 都会发出并持久化一个 `adaptive-control:telemetry:v1` 事件：
+
+```json
+{
+  "schemaVersion": 1,
+  "trigger": "repeated_failure",
+  "check": "trajectory",
+  "signals": {
+    "stuck": 0.91,
+    "planStale": 0.34,
+    "reflectionLikelyHelpful": 0.82
+  },
+  "decision": "REFLECT",
+  "mode": "observe",
+  "stateHash": "…",
+  "provider": "typesafe",
+  "model": "jev-latest",
+  "latencyMs": 104,
+  "timestamp": 0,
+  "laterOutcome": "recovered"
+}
+```
+
+`laterOutcome` 是轻量启发式标签：干预后下一次成功 tool result 记为 `recovered`，失败记为 `persisted`。它适合 shadow analysis，不等同于因果归因。
+
+## 安装与配置
 
 ```bash
 npm install
@@ -57,15 +108,16 @@ npm run build
 pi install .
 ```
 
-默认 `observe`（只记录评估，不打扰 Agent）：
+默认是 `observe`：
 
 ```bash
-/adaptive-control mode observe   # 记录评估与干预事件，不注入建议
-/adaptive-control mode assist    # 注入反思/重规划/验证建议
-/adaptive-control mode enforce   # 额外阻止未通过验证的 goal_control(action="complete")
+/adaptive-control mode off
+/adaptive-control mode observe
+/adaptive-control mode assist
+/adaptive-control mode enforce
 ```
 
-配置放在项目 `.pi/adaptive-control.json`：
+项目配置 `.pi/adaptive-control.json`：
 
 ```json
 {
@@ -73,6 +125,7 @@ pi install .
   "model": "jev-latest",
   "timeoutMs": 2000,
   "cooldownTurns": 2,
+  "contentPolicy": "redacted-snippets",
   "thresholds": {
     "stuck": 0.8,
     "planStale": 0.8,
@@ -82,34 +135,25 @@ pi install .
 }
 ```
 
-完整字段见 `src/pi/config.ts`。设置 `TYPESAFE_API_KEY` 后跑 `npm run test:live` 验证连通性。
+provider 超时或报错时 fail-open；默认 2 秒超时、0 次重试。
 
-## 三个 Skill
+## Skills
 
-遵循 Agent Skills 标准，可脱离扩展单独加载。`control_assess` 工具不可用时，Skill 退化为手动执行同一套规则，并标注 **unassessed by a Decision Provider**：
+- `adaptive-reflection`：检查假设并选择不同的证据生产动作；
+- `adaptive-replan`：计划无法解释新证据时做最小重规划；
+- `adaptive-verification`：完成声明必须有逐项可检查证据。
 
-- **adaptive-reflection**：证据显示连续失败时，停下来检查假设，换一个下一步动作；
-- **adaptive-replan**：计划解释不了新证据时，把既有步骤分为 keep / discard / revise，只补最小缺口；
-- **adaptive-verification**：完成声明必须有可检查的证据，禁止空口声称完成。
-
-护栏写死在 Skill 文档里：单次普通失败不足以重规划、禁止静默改写计划文件、禁止仅因加载了 Skill 就绕过用户约束。
+Skill 负责行为流程；Extension/Hook 负责 runtime control。controller policy 不复制进 Skill prompt。
 
 ## 开发与评估
 
 ```bash
-npm run typecheck      # 类型检查
-npm test               # 单元 + 集成测试（6 个）
-npm run eval:fixtures  # 确定性策略 fixture 评测（5/5）
-npm pack --dry-run     # 确认发布内容
+npm run typecheck
+npm test
+npm run eval:fixtures
+npm pack --dry-run
 ```
 
-`eval/cases.jsonl` 覆盖正常推进、连续失败、计划失效、完成证据不足、完成证据充分五类轨迹，回归验证策略行为。
+`eval/cases.jsonl` 当前包含 32 条带标签 trajectory cases，并报告 intervention precision/recall、false/missed intervention rate 和 action preferred-match。它们用于验证 deterministic policy 与标注 schema，**不证明 AAC 对真实 agent 有效，也不证明 Jev signal quality**。下一步评估应使用脱敏真实轨迹、人工复标和离线 policy/provider replay。
 
-## 路线图
-
-- [ ] 基于 ≥30 条脱敏真实轨迹的精度/召回、漏干预/误干预评测
-- [ ] off / observe / assist / enforce 四模式对比实验
-- [ ] 更多决策提供方 adapter（本地模型、OpenAI 等）
-- [ ] 与 pi-goal / pi-plan / pi-lens 的更深度协作
-
-完整技术设计：[TECHNICAL_DESIGN_v0.1.md](./TECHNICAL_DESIGN_v0.1.md)
+完整 v0.2 设计：[TECHNICAL_DESIGN_v0.2.md](./TECHNICAL_DESIGN_v0.2.md)

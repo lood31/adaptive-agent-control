@@ -1,7 +1,9 @@
-import { stableHash } from "./hash.js";
+import { createHmac, randomBytes } from "node:crypto";
+import { stableHash, stableStringify } from "./hash.js";
 import { redactValue, summarize, truncate } from "./redaction.js";
 import type {
   CompletionAttempt,
+  ContentPolicy,
   GoalSnapshot,
   ObservedState,
   PlanSnapshot,
@@ -11,6 +13,7 @@ import type {
 export interface TrackerSnapshot {
   state: ObservedState;
   lastFailureFingerprint?: string;
+  fingerprintKey?: string;
   lastAssessmentKey?: string;
   assessedThisTurn: boolean;
 }
@@ -33,15 +36,55 @@ function boundedEvents(events: RecentEvent[], limit: number): RecentEvent[] {
   return events.slice(-Math.max(1, limit));
 }
 
+interface OperationIdentity {
+  executable?: string;
+  operation?: string;
+  argumentStructure?: string[];
+  shape?: InputShape;
+  normalizedInput?: ReturnType<typeof redactValue>;
+}
+
+function commandIdentity(command: string): OperationIdentity {
+  const tokens = command.trim().split(/\s+/).slice(0, 16);
+  return {
+    executable: tokens[0]?.toLowerCase() ?? "unknown",
+    operation: tokens.find((token, index) => index > 0 && !token.startsWith("-"))?.toLowerCase() ?? "none",
+    argumentStructure: tokens.slice(1).map((token) => token.startsWith("-") ? token.replace(/=.*/, "=<value>") : "<arg>"),
+  };
+}
+
+function operationIdentity(tool: string, input: unknown): OperationIdentity {
+  if (tool === "bash" && input && typeof input === "object" && "command" in input) {
+    const command = (input as { command?: unknown }).command;
+    if (typeof command === "string") return commandIdentity(command);
+  }
+  return { shape: shapeOf(input), normalizedInput: redactValue(input) };
+}
+
+function eventSummary(policy: ContentPolicy, phase: "call" | "result", value: unknown, failed = false): string {
+  if (policy === "redacted-snippets") return summarize(redactValue(value));
+  if (phase === "call") return "tool input omitted";
+  return failed ? "failed output omitted" : "successful output omitted";
+}
+
 export class StateTracker {
   private state: ObservedState;
   private readonly stateWindow: number;
+  private readonly contentPolicy: ContentPolicy;
+  private readonly fingerprintKey: string;
   private lastFailureFingerprint: string | undefined;
   private lastAssessmentKey: string | undefined;
   private assessedThisTurn = false;
 
-  constructor(sessionId: string, stateWindow = 12, snapshot?: TrackerSnapshot) {
+  constructor(
+    sessionId: string,
+    stateWindow = 12,
+    snapshot?: TrackerSnapshot,
+    contentPolicy: ContentPolicy = "redacted-snippets",
+  ) {
     this.stateWindow = Math.max(1, stateWindow);
+    this.contentPolicy = contentPolicy;
+    this.fingerprintKey = snapshot?.fingerprintKey ?? randomBytes(32).toString("hex");
     this.state = snapshot?.state ?? {
       schemaVersion: 1,
       sessionId,
@@ -50,7 +93,6 @@ export class StateTracker {
         consecutiveFailures: 0,
         repeatedFailureCount: 0,
         editChurn: 0,
-        // A fresh session has no prior intervention, so it must not start in cooldown.
         turnsSinceIntervention: Number.MAX_SAFE_INTEGER,
       },
     };
@@ -66,6 +108,7 @@ export class StateTracker {
   snapshot(): TrackerSnapshot {
     return {
       state: structuredClone(this.state),
+      fingerprintKey: this.fingerprintKey,
       ...(this.lastFailureFingerprint ? { lastFailureFingerprint: this.lastFailureFingerprint } : {}),
       ...(this.lastAssessmentKey ? { lastAssessmentKey: this.lastAssessmentKey } : {}),
       assessedThisTurn: this.assessedThisTurn,
@@ -91,13 +134,12 @@ export class StateTracker {
   }
 
   recordToolCall(tool: string, input: unknown): void {
-    const event: RecentEvent = {
+    this.push({
       kind: isEditTool(tool) ? "edit" : "tool_call",
       tool: truncate(tool, 80),
-      summary: summarize(redactValue(input)),
+      summary: eventSummary(this.contentPolicy, "call", input),
       timestamp: Date.now(),
-    };
-    this.push(event);
+    });
   }
 
   recordToolResult(tool: string, input: unknown, isError: boolean, content: unknown, details?: unknown): void {
@@ -105,11 +147,12 @@ export class StateTracker {
       ? (details as { exitCode?: unknown }).exitCode
       : undefined;
     const failed = isError || (typeof explicitExitCode === "number" && explicitExitCode !== 0);
-    const fingerprint = stableHash({
-      tool,
-      inputShape: shapeOf(input),
-      errorClass: failed ? errorClass(content) : "ok",
-    });
+    let exitClass = "unknown";
+    if (typeof explicitExitCode === "number") exitClass = explicitExitCode === 0 ? "zero" : "nonzero";
+    const fingerprint = createHmac("sha256", this.fingerprintKey)
+      .update(stableStringify({ tool, operation: operationIdentity(tool, input), exitClass, errorClass: failed ? errorClass(content) : "ok" }))
+      .digest("hex")
+      .slice(0, 16);
 
     if (failed) {
       this.state.counters.consecutiveFailures += 1;
@@ -128,7 +171,7 @@ export class StateTracker {
       tool: truncate(tool, 80),
       ok: !failed,
       fingerprint,
-      summary: summarize(content),
+      summary: eventSummary(this.contentPolicy, "result", content, failed),
       timestamp: Date.now(),
     });
 
@@ -140,8 +183,8 @@ export class StateTracker {
       ? criteria.filter((item): item is string => typeof item === "string").slice(0, 8).map((item) => truncate(item, 160))
       : [];
     this.state.completionAttempt = {
-      claimedEvidence: summarize(claimedEvidence),
-      criteria: normalizedCriteria,
+      claimedEvidence: this.contentPolicy === "redacted-snippets" ? summarize(claimedEvidence) : "claim omitted",
+      criteria: this.contentPolicy === "redacted-snippets" ? normalizedCriteria : normalizedCriteria.map(() => "criterion omitted"),
     } satisfies CompletionAttempt;
   }
 

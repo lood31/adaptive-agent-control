@@ -13,6 +13,6 @@ test("optional live Jev smoke test", { skip: !live }, async () => {
     completionAttempt: { claimedEvidence: "smoke test", criteria: ["response returned"] },
   };
   const provider = new TypeSafeJevProvider({ model: "jev-latest", timeoutMs: 5_000, maxRetries: 0 });
-  const result = await provider.assess("completion", state);
+  const result = await provider.assess("completion", { observedState: state });
   if (typeof result.signals.completionSupported !== "number") throw new Error("Jev returned no completion signal");
 });

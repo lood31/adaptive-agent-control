@@ -6,18 +6,13 @@ import { decideAction } from "../src/core/policy.js";
 import { StateTracker } from "../src/core/state-builder.js";
 import { triggerFor } from "../src/core/trigger-engine.js";
 import type { AdaptiveConfig, ObservedState } from "../src/core/types.js";
+import { DEFAULT_CONFIG } from "../src/pi/config.js";
 import { TypeSafeJevProvider } from "../src/providers/typesafe-jev.js";
 
 const config: AdaptiveConfig = {
-  mode: "observe",
+  ...structuredClone(DEFAULT_CONFIG),
   provider: "mock",
   model: "fixture",
-  timeoutMs: 2_000,
-  maxRetries: 0,
-  cooldownTurns: 2,
-  stateWindow: 12,
-  contentPolicy: "redacted-snippets",
-  thresholds: { stuck: 0.8, planStale: 0.8, reflectionHelpful: 0.7, completionSupported: 0.8 },
 };
 
 function state(overrides: Partial<ObservedState> = {}): ObservedState {
@@ -47,6 +42,29 @@ test("state tracker counts repeated failures and redacts sensitive snippets", ()
   assert.equal(JSON.stringify(current).includes("super-secret"), false);
 });
 
+test("failure fingerprint distinguishes command operations with the same shape", () => {
+  const tracker = new StateTracker("test", 12);
+  tracker.recordToolResult("bash", { command: "npm test" }, true, "syntax error", { exitCode: 1 });
+  tracker.recordToolResult("bash", { command: "git status" }, true, "syntax error", { exitCode: 1 });
+  const current = tracker.getState();
+  assert.equal(current.counters.consecutiveFailures, 2);
+  assert.equal(current.counters.repeatedFailureCount, 1);
+  assert.notEqual(current.recentEvents[0]?.fingerprint, current.recentEvents[1]?.fingerprint);
+  assert.equal(JSON.stringify(tracker.snapshot()).includes("npm test"), false);
+});
+
+test("metadata-only policy omits tool and completion snippets", () => {
+  const tracker = new StateTracker("test", 12, undefined, "metadata-only");
+  tracker.recordToolCall("read", { path: "private-source.ts" });
+  tracker.recordToolResult("read", { path: "private-source.ts" }, false, "private file contents");
+  tracker.recordCompletionAttempt("secret evidence", ["private criterion"]);
+  const serialized = JSON.stringify(tracker.getState());
+  assert.equal(serialized.includes("private-source"), false);
+  assert.equal(serialized.includes("private file contents"), false);
+  assert.equal(serialized.includes("secret evidence"), false);
+  assert.equal(serialized.includes("private criterion"), false);
+});
+
 test("policy selects reflection, replan, and verification at thresholds", () => {
   const reflection = decideAction("reflection", {
     signals: { stuck: 0.9, reflectionLikelyHelpful: 0.9 },
@@ -54,6 +72,13 @@ test("policy selects reflection, replan, and verification at thresholds", () => 
     model: "fixture",
   }, state({ counters: { consecutiveFailures: 2, repeatedFailureCount: 2, editChurn: 0, turnsSinceIntervention: 10 } }), config);
   assert.equal(reflection.action, "REFLECT");
+
+  const arbitration = decideAction("trajectory", {
+    signals: { stuck: 0.9, planStale: 0.9, reflectionLikelyHelpful: 0.95 },
+    provider: "fixture",
+    model: "fixture",
+  }, state({ counters: { consecutiveFailures: 2, repeatedFailureCount: 2, editChurn: 0, turnsSinceIntervention: 10 } }), config);
+  assert.equal(arbitration.action, "REPLAN");
 
   const replan = decideAction("replan", {
     signals: { stuck: 0.9, planStale: 0.9 },
@@ -87,9 +112,14 @@ test("TypeSafe provider maps Jev answers and sends bounded state", async () => {
     },
   } as unknown as TypeSafeClient;
   const provider = new TypeSafeJevProvider({ model: "jev-latest", timeoutMs: 2_000, maxRetries: 0, client: fakeClient });
-  const result = await provider.assess("reflection", state({ goal: { objective: "token=super-secret" } }));
+  const result = await provider.assess("trajectory", {
+    observedState: state({ goal: { objective: "token=super-secret" } }),
+    agentContext: { hypothesis: "token=agent-secret", evidenceClaims: ["claim one"] },
+  });
   assert.equal(result.signals.stuck, 0.9);
   assert.equal(result.signals.reflectionLikelyHelpful, 0.85);
   assert.equal(result.usage?.inputTokens, 11);
   assert.equal(JSON.stringify(requestState).includes("super-secret"), false);
+  assert.equal(JSON.stringify(requestState).includes("agent-secret"), false);
+  assert.equal(JSON.stringify(requestState).includes("untrusted_agent_hypothesis"), true);
 });
