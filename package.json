@@ -2,6 +2,7 @@
   "name": "adaptive-agent-control",
   "version": "0.2.2",
   "description": "A provider-neutral adaptive control plane for Pi agents",
+  "repository": "github:lood31/adaptive-agent-control",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -31,6 +32,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/tests/core.test.js dist/tests/extension.test.js dist/tests/session-store.test.js",
     "eval:fixtures": "npm run build && node dist/eval/score.js",
